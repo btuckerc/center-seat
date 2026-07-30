@@ -82,11 +82,17 @@ func (q QueryRequest) Validate() error {
 	if q.MovieQuery == "" {
 		return errors.New("movie_query is required")
 	}
-	if q.Location.Query == "" && q.Location.Latitude == 0 && q.Location.Longitude == 0 {
-		return errors.New("location query or coordinates are required")
+	if q.Location.Latitude == 0 && q.Location.Longitude == 0 {
+		return errors.New("location latitude and longitude are required")
 	}
-	if q.Location.RadiusMiles <= 0 || q.Location.RadiusMiles > 250 {
-		return errors.New("location.radius_miles must be between 0 and 250")
+	if q.Location.Latitude < -90 || q.Location.Latitude > 90 || q.Location.Longitude < -180 || q.Location.Longitude > 180 {
+		return errors.New("location coordinates are outside valid latitude/longitude bounds")
+	}
+	if q.Location.RadiusMiles <= 0 || q.Location.RadiusMiles > 49 {
+		return errors.New("location.radius_miles must be between 0 and 49")
+	}
+	if q.MaxDistanceMiles <= 0 || q.MaxDistanceMiles > 49 {
+		return errors.New("max_distance_miles must be between 0 and 49")
 	}
 	if q.TicketCount < 1 || q.TicketCount > 12 {
 		return errors.New("ticket_count must be between 1 and 12")

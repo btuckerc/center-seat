@@ -63,6 +63,7 @@ export function SearchExperience() {
   const [providerState, setProviderState] = useState<ProviderState>("checking");
   const [searching, setSearching] = useState(false);
   const [locating, setLocating] = useState(false);
+  const [locationProblem, setLocationProblem] = useState("");
   const [copied, setCopied] = useState(false);
 
   useEffect(() => {
@@ -77,7 +78,7 @@ export function SearchExperience() {
         if (
           response.ok &&
           statuses.length >= 2 &&
-          statuses.every((provider) => provider.configured && provider.status !== "disabled")
+          statuses.every((provider) => provider.configured && provider.status === "healthy")
         ) {
           setProviderState("ready");
         } else {
@@ -102,8 +103,12 @@ export function SearchExperience() {
   };
 
   const useCurrentLocation = () => {
-    if (!navigator.geolocation) return;
+    if (!navigator.geolocation) {
+      setLocationProblem("This browser does not expose precise location.");
+      return;
+    }
     setLocating(true);
+    setLocationProblem("");
     navigator.geolocation.getCurrentPosition(
       (position) => {
         setDraft((current) => ({
@@ -112,9 +117,13 @@ export function SearchExperience() {
           latitude: position.coords.latitude,
           longitude: position.coords.longitude,
         }));
+        setLocationProblem("");
         setLocating(false);
       },
-      () => setLocating(false),
+      () => {
+        setLocationProblem("Location permission was not granted. Atom requires coordinates to search nearby theaters.");
+        setLocating(false);
+      },
       { enableHighAccuracy: true, timeout: 10_000, maximumAge: 300_000 },
     );
   };
@@ -207,7 +216,9 @@ export function SearchExperience() {
   const searchText = searching
     ? "Querying licensed providers…"
     : providerState === "ready"
-      ? "Find live seats"
+      ? draft.latitude === undefined || draft.longitude === undefined
+        ? "Use precise location to continue"
+        : "Find live seats"
       : "Connect live providers to search";
 
   return (
@@ -247,7 +258,7 @@ export function SearchExperience() {
             <div className="provider-warning" role="status">
               <b>{providerText}</b>
               <span>
-                CenterSeat is refusing to show fabricated inventory. A licensed Vista tenant and the production query service must be connected before search is enabled.
+                CenterSeat is refusing to show fabricated inventory. An Atom Tickets Partner API key and the production query service must be connected before search is enabled. <a href="https://www.atomtickets.com/partnerships" target="_blank" rel="noreferrer">Request partner access ↗</a>
               </span>
             </div>
           ) : null}
@@ -263,14 +274,18 @@ export function SearchExperience() {
                 <FieldLabel number="2">Near</FieldLabel>
                 <input
                   value={draft.location}
-                  onChange={(event) => setDraft((current) => ({ ...current, location: event.target.value, latitude: undefined, longitude: undefined }))}
-                  placeholder="City, ZIP, theater, or address"
+                  onChange={(event) => {
+                    setDraft((current) => ({ ...current, location: event.target.value, latitude: undefined, longitude: undefined }));
+                    setLocationProblem("Use precise location after changing this label.");
+                  }}
+                  placeholder="Location label"
                   required
                 />
               </label>
               <button className="location-button" onClick={useCurrentLocation} type="button">
-                {locating ? "Locating…" : "Use precise location"}
+                {locating ? "Locating…" : draft.latitude !== undefined ? "Precise location set ✓" : "Use precise location · required"}
               </button>
+              {locationProblem ? <span className="location-problem" role="alert">{locationProblem}</span> : null}
             </div>
 
             <div className="field-row date-range-row">
@@ -334,7 +349,7 @@ export function SearchExperience() {
             <div className="advanced-grid">
               <label className="field range-field">
                 <FieldLabel>Maximum distance <em>{draft.maxDistance} mi</em></FieldLabel>
-                <input type="range" min="2" max="100" value={draft.maxDistance} onChange={(event) => update("maxDistance", Number(event.target.value))} />
+                <input type="range" min="2" max="49" value={draft.maxDistance} onChange={(event) => update("maxDistance", Number(event.target.value))} />
               </label>
               <label className="check-field price-toggle">
                 <input type="checkbox" checked={draft.limitPrice} onChange={(event) => update("limitPrice", event.target.checked)} />
@@ -359,7 +374,7 @@ export function SearchExperience() {
             </div>
           </details>
 
-          <button className="search-button" disabled={searching || providerState !== "ready" || !draft.movie.trim() || !draft.location.trim() || draft.formats.length === 0} type="submit">
+          <button className="search-button" disabled={searching || providerState !== "ready" || !draft.movie.trim() || !draft.location.trim() || draft.latitude === undefined || draft.longitude === undefined || draft.formats.length === 0} type="submit">
             <span>{searchText}</span><b>{searching ? <i className="button-spinner" /> : "→"}</b>
           </button>
           <p className="query-note">No demo fallback. No holds. The winning live map is rechecked before it is returned.</p>
@@ -381,7 +396,7 @@ export function SearchExperience() {
         ) : null}
 
         {!problem && providerState !== "ready" ? (
-          <div className="connection-state"><span>PRODUCTION SAFETY</span><h3>Live inventory is not connected yet.</h3><p>The previous synthetic results have been removed. Search will remain disabled until the licensed provider service is configured and healthy.</p><div className="connection-requirements"><b>Required</b><span>Vista OCAPI tenant</span><span>GAS credentials</span><span>Production API deployment</span></div></div>
+          <div className="connection-state"><span>PRODUCTION SAFETY</span><h3>Live inventory is not connected yet.</h3><p>The previous synthetic results have been removed. Search will remain disabled until the licensed provider service is configured and healthy.</p><div className="connection-requirements"><b>Required</b><span>Atom Partner API key</span><span>Precise location</span><span>Production API deployment</span></div></div>
         ) : null}
 
         {!problem && providerState === "ready" && !result ? (

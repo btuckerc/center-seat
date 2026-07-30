@@ -200,7 +200,7 @@ components:
         max_distance_miles:
           type: number
           exclusiveMinimum: 0
-          maximum: 250
+          maximum: 49
           default: 25
         max_total_price:
           type: number
@@ -233,7 +233,7 @@ components:
     LocationConstraint:
       type: object
       additionalProperties: false
-      required: [radius_miles]
+      required: [latitude, longitude, radius_miles]
       properties:
         query:
           type: string
@@ -249,7 +249,7 @@ components:
         radius_miles:
           type: number
           exclusiveMinimum: 0
-          maximum: 250
+          maximum: 49
     DateConstraint:
       type: object
       additionalProperties: false

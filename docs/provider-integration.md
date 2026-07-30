@@ -1,21 +1,21 @@
 # Provider integration
 
 CenterSeat models discovery and seat inventory as separate capabilities even
-when one licensed platform supplies both. The first production adapter uses
-Vista Digital Platform / OCAPI for both roles.
+when one licensed platform supplies both. The production adapter uses the Atom
+Tickets Partner API for both roles.
 
-## Implemented Vista path
+## Implemented Atom path
 
-The adapter performs server-side GAS token exchange, caches the bearer token,
-discovers showtimes for every business date in the requested range with bounded
-concurrency, loads seat layouts, overlays current seat availability, and repeats
-the winning availability read without preview mode. Layouts are cached separately
-from volatile seat status. Unknown status values fail closed as blocked seats.
+The adapter authenticates with Atom's server-side `x-api-key`, looks up nearby
+supported venues, batches multi-venue showtime discovery in Atom's seven-day
+windows, and calls the read-only auditorium discovery endpoint for current seat
+status. It repeats the winning map read before returning the recommendation and
+never calls the lease endpoint. Unknown seat states fail closed as blocked.
 
-Required environment variables are `VISTA_API_BASE_URL`, `VISTA_AUTH_URL`,
-`VISTA_CLIENT_ID`, `VISTA_USERNAME`, and `VISTA_PASSWORD`. `VISTA_SITE_IDS` and
-`VISTA_REGION_CODE` can restrict scope. `VISTA_BOOKING_URL_TEMPLATE` is optional;
-without it, no booking link is returned.
+`ATOM_API_KEY` is required. `ATOM_API_BASE_URL` defaults to Atom production, and
+`ATOM_PARTNER_ID` is optional unless assigned during onboarding. Atom's venue
+API requires latitude/longitude and limits radius to 80 km. Checkout links are
+used only when Atom supplies a valid HTTPS `atomtickets.com` URL.
 
 ## Discovery adapter
 

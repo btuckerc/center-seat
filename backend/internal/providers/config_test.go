@@ -18,3 +18,11 @@ func TestProviderModeIsRequired(t *testing.T) {
 		t.Fatal("expected missing provider mode to fail closed")
 	}
 }
+
+func TestAtomModeRequiresAPIKey(t *testing.T) {
+	t.Setenv("CENTERSEAT_PROVIDER_MODE", "atom")
+	t.Setenv("ATOM_API_KEY", "")
+	if _, _, err := FromEnvironment(); err == nil {
+		t.Fatal("expected missing Atom key to fail before startup")
+	}
+}

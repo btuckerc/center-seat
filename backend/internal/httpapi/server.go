@@ -57,7 +57,7 @@ func (s *Server) routes() {
 
 func (s *Server) ready(w http.ResponseWriter, _ *http.Request) {
 	for _, provider := range s.service.ProviderStatuses() {
-		if !provider.Configured || provider.Status == "disabled" {
+		if !provider.Configured || provider.Status != "healthy" {
 			writeJSON(w, http.StatusServiceUnavailable, map[string]any{"status": "not_ready", "provider": provider.Name})
 			return
 		}

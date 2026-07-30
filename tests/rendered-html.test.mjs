@@ -28,6 +28,8 @@ test("server-renders the CenterSeat product surface", async () => {
   assert.match(html, /Provider setup required|Checking live providers/);
   assert.match(html, /Results appear only after licensed providers respond/);
   assert.match(html, /Advanced constraints/);
+  assert.match(html, /Atom Tickets Partner API key/);
+  assert.match(html, /Use precise location · required/);
   assert.doesNotMatch(html, /example\.com|Crown Arc Cinema|Spider-Man: Brand New Day/);
   assert.doesNotMatch(html, /codex-preview|Your site is taking shape|react-loading-skeleton/i);
 });
@@ -55,6 +57,7 @@ test("uses provider geometry and explicit inventory states instead of a syntheti
   assert.match(seatMap, /status-held/);
   assert.match(seatMap, /geometry-centerline/);
   assert.match(search, /dates: \{ start: draft\.dateStart, end: draft\.dateEnd \}/);
+  assert.match(search, /draft\.latitude === undefined/);
   assert.match(search, /fetch\("\/api\/seat-queries"/);
   assert.match(apiRoute, /CENTERSEAT_API_URL/);
   assert.doesNotMatch(search, /runDemoQuery|example\.com|Crown Arc Cinema/);

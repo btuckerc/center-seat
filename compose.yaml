@@ -19,15 +19,10 @@ services:
     environment:
       CENTERSEAT_HTTP_ADDR: :8080
       CENTERSEAT_ENV: production
-      CENTERSEAT_PROVIDER_MODE: vista
-      VISTA_API_BASE_URL: ${VISTA_API_BASE_URL:?required}
-      VISTA_AUTH_URL: ${VISTA_AUTH_URL:?required}
-      VISTA_CLIENT_ID: ${VISTA_CLIENT_ID:?required}
-      VISTA_USERNAME: ${VISTA_USERNAME:?required}
-      VISTA_PASSWORD: ${VISTA_PASSWORD:?required}
-      VISTA_REGION_CODE: ${VISTA_REGION_CODE:-}
-      VISTA_SITE_IDS: ${VISTA_SITE_IDS:-}
-      VISTA_BOOKING_URL_TEMPLATE: ${VISTA_BOOKING_URL_TEMPLATE:-}
+      CENTERSEAT_PROVIDER_MODE: atom
+      ATOM_API_BASE_URL: ${ATOM_API_BASE_URL:-https://api.atomtickets.com}
+      ATOM_API_KEY: ${ATOM_API_KEY:?required}
+      ATOM_PARTNER_ID: ${ATOM_PARTNER_ID:-}
       DATABASE_URL: postgres://centerseat:${POSTGRES_PASSWORD:?required}@postgres:5432/centerseat?sslmode=disable
       REDIS_URL: redis://redis:6379/0
     ports:

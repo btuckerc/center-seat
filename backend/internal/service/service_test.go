@@ -14,7 +14,7 @@ func TestQueryReturnsVerifiedWinnerAndAlternatives(t *testing.T) {
 	svc := New(provider, provider, 4)
 	today := time.Now().Format(time.DateOnly)
 	q := domain.QueryRequest{
-		MovieQuery: "The Test Film", Location: domain.LocationConstraint{Query: "Charlotte", RadiusMiles: 25},
+		MovieQuery: "The Test Film", Location: domain.LocationConstraint{Query: "Charlotte", Latitude: 35.2271, Longitude: -80.8431, RadiusMiles: 25},
 		Dates: domain.DateConstraint{Start: today, End: today}, TicketCount: 2, SeatProfile: "balanced",
 		MaxDistanceMiles: 25, CandidateLimit: 12, Time: domain.TimeConstraint{Mode: "inside", Start: "17:00", End: "22:00", Timezone: "America/New_York"},
 	}
@@ -41,7 +41,7 @@ func TestOutsideTimeWindow(t *testing.T) {
 	svc := New(provider, provider, 2)
 	today := time.Now().Format(time.DateOnly)
 	q := domain.QueryRequest{
-		MovieQuery: "Film", Location: domain.LocationConstraint{Query: "28202", RadiusMiles: 25},
+		MovieQuery: "Film", Location: domain.LocationConstraint{Query: "28202", Latitude: 35.2271, Longitude: -80.8431, RadiusMiles: 25},
 		Dates: domain.DateConstraint{Start: today, End: today}, TicketCount: 1, SeatProfile: "balanced", CandidateLimit: 12,
 		MaxDistanceMiles: 25, Time: domain.TimeConstraint{Mode: "outside", Start: "17:00", End: "21:00"},
 	}

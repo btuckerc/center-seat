@@ -1,7 +1,9 @@
 package providers
 
 import (
+	"context"
 	"errors"
+	"fmt"
 	"os"
 	"strings"
 	"time"
@@ -10,36 +12,25 @@ import (
 func FromEnvironment() (Discovery, Inventory, error) {
 	mode := strings.ToLower(strings.TrimSpace(os.Getenv("CENTERSEAT_PROVIDER_MODE")))
 	switch mode {
-	case "vista":
-		provider, err := NewVista(VistaConfig{
-			APIBaseURL:         os.Getenv("VISTA_API_BASE_URL"),
-			AuthURL:            os.Getenv("VISTA_AUTH_URL"),
-			ClientID:           os.Getenv("VISTA_CLIENT_ID"),
-			Username:           os.Getenv("VISTA_USERNAME"),
-			Password:           os.Getenv("VISTA_PASSWORD"),
-			RegionCode:         os.Getenv("VISTA_REGION_CODE"),
-			SiteIDs:            splitCSV(os.Getenv("VISTA_SITE_IDS")),
-			BookingURLTemplate: os.Getenv("VISTA_BOOKING_URL_TEMPLATE"),
-			RequestTimeout:     8 * time.Second,
+	case "atom":
+		provider, err := NewAtom(AtomConfig{
+			BaseURL:        os.Getenv("ATOM_API_BASE_URL"),
+			APIKey:         os.Getenv("ATOM_API_KEY"),
+			PartnerID:      os.Getenv("ATOM_PARTNER_ID"),
+			RequestTimeout: 8 * time.Second,
 		}, nil)
 		if err != nil {
 			return nil, nil, err
 		}
+		probeContext, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := provider.Check(probeContext); err != nil {
+			return nil, nil, fmt.Errorf("Atom startup probe failed: %w", err)
+		}
 		return provider, provider, nil
 	case "":
-		return nil, nil, errors.New("CENTERSEAT_PROVIDER_MODE is required; set it to vista for production")
+		return nil, nil, errors.New("CENTERSEAT_PROVIDER_MODE is required; set it to atom for production")
 	default:
-		return nil, nil, errors.New("unsupported CENTERSEAT_PROVIDER_MODE; supported value is vista")
+		return nil, nil, errors.New("unsupported CENTERSEAT_PROVIDER_MODE; supported value is atom")
 	}
-}
-
-func splitCSV(value string) []string {
-	parts := strings.Split(value, ",")
-	result := make([]string, 0, len(parts))
-	for _, part := range parts {
-		if trimmed := strings.TrimSpace(part); trimmed != "" {
-			result = append(result, trimmed)
-		}
-	}
-	return result
 }

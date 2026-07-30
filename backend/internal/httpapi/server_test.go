@@ -20,7 +20,7 @@ func TestCreateQueryIsIdempotentAndCacheable(t *testing.T) {
 	server := New(service.New(provider, provider, 3), slog.New(slog.NewTextHandler(io.Discard, nil)))
 	today := time.Now().Format(time.DateOnly)
 	payload, _ := json.Marshal(domain.QueryRequest{
-		MovieQuery: "Test Film", Location: domain.LocationConstraint{Query: "Charlotte", RadiusMiles: 25},
+		MovieQuery: "Test Film", Location: domain.LocationConstraint{Query: "Charlotte", Latitude: 35.2271, Longitude: -80.8431, RadiusMiles: 25},
 		Dates: domain.DateConstraint{Start: today, End: today}, TicketCount: 1, SeatProfile: "balanced", CandidateLimit: 10, MaxDistanceMiles: 25,
 	})
 	post := func() *httptest.ResponseRecorder {
