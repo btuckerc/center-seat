@@ -43,10 +43,11 @@ Winner + alternatives + score explanation + freshness + booking URL
 | Auditorium layouts | 1–30 days, keyed by payload hash |
 | Live availability | 0–8 seconds |
 
-Redis is the hot cache and concurrency-control surface. PostgreSQL preserves
-normalized discovery data, provider observations, and reproducible query
-results. The demo runtime uses process memory so it can run without credentials;
-production adapters implement the same interfaces and use the durable stores.
+Redis is the intended hot cache and concurrency-control surface. PostgreSQL
+preserves the normalized schema for provider observations and reproducible query
+results. The current read path keeps short-lived request state in-process; the
+container definitions provision the durable services for the next persistence
+step. Production startup never selects fixture data implicitly.
 
 ## Reliability rules
 

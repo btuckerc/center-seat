@@ -18,9 +18,18 @@ services:
       context: backend
     environment:
       CENTERSEAT_HTTP_ADDR: :8080
-      DATABASE_URL: postgres://centerseat:centerseat@postgres:5432/centerseat?sslmode=disable
+      CENTERSEAT_ENV: production
+      CENTERSEAT_PROVIDER_MODE: vista
+      VISTA_API_BASE_URL: ${VISTA_API_BASE_URL:?required}
+      VISTA_AUTH_URL: ${VISTA_AUTH_URL:?required}
+      VISTA_CLIENT_ID: ${VISTA_CLIENT_ID:?required}
+      VISTA_USERNAME: ${VISTA_USERNAME:?required}
+      VISTA_PASSWORD: ${VISTA_PASSWORD:?required}
+      VISTA_REGION_CODE: ${VISTA_REGION_CODE:-}
+      VISTA_SITE_IDS: ${VISTA_SITE_IDS:-}
+      VISTA_BOOKING_URL_TEMPLATE: ${VISTA_BOOKING_URL_TEMPLATE:-}
+      DATABASE_URL: postgres://centerseat:${POSTGRES_PASSWORD:?required}@postgres:5432/centerseat?sslmode=disable
       REDIS_URL: redis://redis:6379/0
-      CENTERSEAT_PROVIDER_MODE: demo
     ports:
       - "8080:8080"
     healthcheck:
@@ -39,7 +48,7 @@ services:
     environment:
       POSTGRES_DB: centerseat
       POSTGRES_USER: centerseat
-      POSTGRES_PASSWORD: centerseat
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?required}
     volumes:
       - centerseat-postgres:/var/lib/postgresql/data
       - ./backend/migrations/000001_core.up.sql:/docker-entrypoint-initdb.d/000001_core.sql:ro

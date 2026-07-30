@@ -16,3 +16,7 @@ type Inventory interface {
 	Supports(domain.Showtime) bool
 	GetAvailability(context.Context, domain.Showtime, bool) (domain.Inventory, error)
 }
+
+type StatusReporter interface {
+	ProviderStatus(kind string) domain.ProviderStatus
+}

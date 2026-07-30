@@ -11,12 +11,12 @@ import (
 	"time"
 
 	"centerseat/backend/internal/domain"
-	"centerseat/backend/internal/providers"
 	"centerseat/backend/internal/service"
+	"centerseat/backend/internal/testfixtures"
 )
 
 func TestCreateQueryIsIdempotentAndCacheable(t *testing.T) {
-	provider := providers.Demo{}
+	provider := testfixtures.Provider{}
 	server := New(service.New(provider, provider, 3), slog.New(slog.NewTextHandler(io.Discard, nil)))
 	today := time.Now().Format(time.DateOnly)
 	payload, _ := json.Marshal(domain.QueryRequest{

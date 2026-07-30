@@ -6,11 +6,11 @@ import (
 	"time"
 
 	"centerseat/backend/internal/domain"
-	"centerseat/backend/internal/providers"
+	"centerseat/backend/internal/testfixtures"
 )
 
 func TestQueryReturnsVerifiedWinnerAndAlternatives(t *testing.T) {
-	provider := providers.Demo{}
+	provider := testfixtures.Provider{}
 	svc := New(provider, provider, 4)
 	today := time.Now().Format(time.DateOnly)
 	q := domain.QueryRequest{
@@ -37,7 +37,7 @@ func TestQueryReturnsVerifiedWinnerAndAlternatives(t *testing.T) {
 }
 
 func TestOutsideTimeWindow(t *testing.T) {
-	provider := providers.Demo{}
+	provider := testfixtures.Provider{}
 	svc := New(provider, provider, 2)
 	today := time.Now().Format(time.DateOnly)
 	q := domain.QueryRequest{

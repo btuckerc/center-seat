@@ -1,6 +1,8 @@
 package ranking
 
 import (
+	"fmt"
+	"math"
 	"testing"
 	"time"
 
@@ -8,7 +10,7 @@ import (
 )
 
 func TestBestBlockUsesGeometryAndContiguity(t *testing.T) {
-	showtime := domain.Showtime{ID: "s1", BookingURL: "https://example.com"}
+	showtime := domain.Showtime{ID: "s1"}
 	inventory := domain.Inventory{Confidence: "exact_coordinates", ObservedAt: time.Now(), Seats: []domain.Seat{
 		{ID: "a1", Label: "E1", Row: "E", Index: 0, X: .05, Y: .60, Type: "recliner", Status: "available"},
 		{ID: "a2", Label: "E2", Row: "E", Index: 1, X: .12, Y: .60, Type: "recliner", Status: "available"},
@@ -39,5 +41,34 @@ func TestBestBlockExcludesUnavailableAndAccessibilitySeatsByDefault(t *testing.T
 	}
 	if got.Seats[0].ID != "available" {
 		t.Fatalf("unexpected seat %s", got.Seats[0].ID)
+	}
+}
+
+func TestDeadCenterNeverSelectsAnOffCenterSeat(t *testing.T) {
+	seats := make([]domain.Seat, 0, 9*14)
+	for row := 0; row < 9; row++ {
+		for index := 0; index < 14; index++ {
+			label := fmt.Sprintf("%c%d", 'A'+row, index+1)
+			seats = append(seats, domain.Seat{
+				ID: label, Label: label, Row: fmt.Sprintf("%c", 'A'+row), Index: index,
+				X: float64(index) / 13, Y: float64(row) / 8, Type: "recliner", Status: "available",
+			})
+		}
+	}
+	recommendation, ok := BestBlock(domain.Showtime{ID: "s1"}, domain.Inventory{
+		Seats: seats, Confidence: "exact_coordinates", ObservedAt: time.Now(),
+	}, domain.QueryRequest{TicketCount: 1, SeatProfile: "dead_center"})
+	if !ok {
+		t.Fatal("expected recommendation")
+	}
+	seat := recommendation.Seats[0]
+	if seat.Label != "E7" && seat.Label != "E8" {
+		t.Fatalf("expected E7 or E8, got %s", seat.Label)
+	}
+	if math.Abs(seat.X-.5) > .04 {
+		t.Fatalf("seat is not geometrically centered: x=%f", seat.X)
+	}
+	if recommendation.SeatMap == nil || recommendation.SeatMap.Target.X != .5 || recommendation.SeatMap.Target.Y != .5 {
+		t.Fatal("missing dead-center target metadata")
 	}
 }

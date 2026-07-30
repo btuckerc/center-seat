@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 async function render() {
@@ -22,9 +23,12 @@ test("server-renders the CenterSeat product surface", async () => {
   assert.match(html, /<title>CenterSeat — Find the seat worth booking<\/title>/i);
   assert.match(html, /Find the one/);
   assert.match(html, /What should we optimize\?/);
-  assert.match(html, /Spider-Man: Brand New Day/);
-  assert.match(html, /Best available/i);
+  assert.match(html, /Date range starts/);
+  assert.match(html, /Range ends/);
+  assert.match(html, /Provider setup required|Checking live providers/);
+  assert.match(html, /Results appear only after licensed providers respond/);
   assert.match(html, /Advanced constraints/);
+  assert.doesNotMatch(html, /example\.com|Crown Arc Cinema|Spider-Man: Brand New Day/);
   assert.doesNotMatch(html, /codex-preview|Your site is taking shape|react-loading-skeleton/i);
 });
 
@@ -35,5 +39,23 @@ test("includes accessible controls and the live-query method", async () => {
   assert.match(html, /Wheelchair spaces/);
   assert.match(html, /Audio description/);
   assert.match(html, /Verify the winner/);
-  assert.match(html, /No holds\. No phantom availability\./);
+  assert.match(html, /No demo fallback\. No holds\./);
+  assert.match(html, /refusing to show fabricated inventory/);
+});
+
+test("uses provider geometry and explicit inventory states instead of a synthetic map", async () => {
+  const [seatMap, search, apiRoute] = await Promise.all([
+    readFile(new URL("../app/components/SeatMap.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/components/SearchExperience.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/api/seat-queries/route.ts", import.meta.url), "utf8"),
+  ]);
+
+  assert.match(seatMap, /recommendation\.seat_map/);
+  assert.match(seatMap, /status-sold/);
+  assert.match(seatMap, /status-held/);
+  assert.match(seatMap, /geometry-centerline/);
+  assert.match(search, /dates: \{ start: draft\.dateStart, end: draft\.dateEnd \}/);
+  assert.match(search, /fetch\("\/api\/seat-queries"/);
+  assert.match(apiRoute, /CENTERSEAT_API_URL/);
+  assert.doesNotMatch(search, /runDemoQuery|example\.com|Crown Arc Cinema/);
 });

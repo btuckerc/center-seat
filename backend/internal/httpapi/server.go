@@ -48,11 +48,21 @@ func New(svc *service.Service, logger *slog.Logger) *Server {
 
 func (s *Server) routes() {
 	s.mux.HandleFunc("GET /healthz", s.health)
-	s.mux.HandleFunc("GET /readyz", s.health)
+	s.mux.HandleFunc("GET /readyz", s.ready)
 	s.mux.HandleFunc("GET /metrics", s.metrics)
 	s.mux.HandleFunc("GET /v1/providers", s.providers)
 	s.mux.HandleFunc("POST /v1/seat-queries", s.createQuery)
 	s.mux.HandleFunc("GET /v1/seat-queries/{query_id}", s.getQuery)
+}
+
+func (s *Server) ready(w http.ResponseWriter, _ *http.Request) {
+	for _, provider := range s.service.ProviderStatuses() {
+		if !provider.Configured || provider.Status == "disabled" {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]any{"status": "not_ready", "provider": provider.Name})
+			return
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"status": "ready", "time": time.Now().UTC()})
 }
 
 func (s *Server) Handler() http.Handler {

@@ -28,10 +28,16 @@ func New(discovery providers.Discovery, inventory providers.Inventory, fanout in
 }
 
 func (s *Service) ProviderStatuses() []domain.ProviderStatus {
-	now := time.Now().UTC()
+	if reporter, ok := s.discovery.(providers.StatusReporter); ok {
+		discovery := reporter.ProviderStatus("discovery")
+		if inventoryReporter, ok := s.inventory.(providers.StatusReporter); ok {
+			return []domain.ProviderStatus{discovery, inventoryReporter.ProviderStatus("inventory")}
+		}
+		return []domain.ProviderStatus{discovery}
+	}
 	return []domain.ProviderStatus{
-		{Name: s.discovery.Name(), Kind: "discovery", Status: "healthy", Coverage: "deterministic local development feed", LastSuccessAt: now},
-		{Name: s.inventory.Name(), Kind: "inventory", Status: "healthy", Coverage: "exact-coordinate reserved seating", LastSuccessAt: now},
+		{Name: s.discovery.Name(), Kind: "discovery", Status: "degraded", Configured: true, Message: "Provider does not report health"},
+		{Name: s.inventory.Name(), Kind: "inventory", Status: "degraded", Configured: true, Message: "Provider does not report health"},
 	}
 }
 
@@ -41,7 +47,7 @@ func (s *Service) Query(ctx context.Context, queryID string, q domain.QueryReque
 	if err := q.Validate(); err != nil {
 		return domain.QueryResponse{}, err
 	}
-	discoveryCtx, cancel := context.WithTimeout(ctx, 2500*time.Millisecond)
+	discoveryCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
 	showtimes, err := s.discovery.Discover(discoveryCtx, q)
 	cancel()
 	if err != nil {
@@ -71,7 +77,7 @@ func (s *Service) Query(ctx context.Context, queryID string, q domain.QueryReque
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
-			inventoryCtx, cancel := context.WithTimeout(ctx, 1800*time.Millisecond)
+			inventoryCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
 			defer cancel()
 			inventory, err := s.inventory.GetAvailability(inventoryCtx, st, false)
 			if err != nil {
@@ -116,7 +122,7 @@ func (s *Service) Query(ctx context.Context, queryID string, q domain.QueryReque
 
 	// Re-read only the winning inventory to reduce stale-seat risk without holding a seat.
 	if len(recommendations) > 0 {
-		verifyCtx, cancel := context.WithTimeout(ctx, 1800*time.Millisecond)
+		verifyCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
 		fresh, err := s.inventory.GetAvailability(verifyCtx, recommendations[0].Showtime, true)
 		cancel()
 		if err == nil {
@@ -143,7 +149,10 @@ func (s *Service) Query(ctx context.Context, queryID string, q domain.QueryReque
 			limit = 5
 		}
 		if limit > 1 {
-			response.Alternatives = recommendations[1:limit]
+			response.Alternatives = append([]domain.Recommendation(nil), recommendations[1:limit]...)
+			for i := range response.Alternatives {
+				response.Alternatives[i].SeatMap = nil
+			}
 		}
 	}
 	return response, nil
@@ -155,6 +164,9 @@ func filterAndPrune(showtimes []domain.Showtime, q domain.QueryRequest) []domain
 	result := make([]domain.Showtime, 0, len(showtimes))
 	for _, st := range showtimes {
 		if !st.ReservedSeating || st.DistanceMiles > q.MaxDistanceMiles {
+			continue
+		}
+		if q.MinStartNoticeMinutes > 0 && st.StartsAt.Before(time.Now().Add(time.Duration(q.MinStartNoticeMinutes)*time.Minute)) {
 			continue
 		}
 		if len(formats) > 0 && !formats[strings.ToLower(st.Format)] {

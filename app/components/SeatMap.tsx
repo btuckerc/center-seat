@@ -1,67 +1,81 @@
-import type { Screening } from "../lib/demo";
+import type { Recommendation, Seat } from "../lib/api";
 
-export function SeatMap({
-  screening,
-  ticketCount,
-}: {
-  screening: Screening;
-  ticketCount: number;
-}) {
-  const selected = new Set(
-    Array.from(
-      { length: ticketCount },
-      (_, index) => `${screening.row}${screening.startSeat + index}`,
-    ),
-  );
-  const rows = Array.from({ length: 9 }, (_, index) =>
-    String.fromCharCode(65 + index),
-  );
+const statusLabel: Record<Seat["status"], string> = {
+  available: "Available",
+  sold: "Occupied",
+  held: "Temporarily held",
+  broken: "Out of service",
+  house: "Blocked by theater",
+};
+
+export function SeatMap({ recommendation }: { recommendation: Recommendation }) {
+  const selected = new Set(recommendation.seats.map((seat) => seat.id));
+  const map = recommendation.seat_map;
+  if (!map?.seats.length) {
+    return (
+      <div className="seat-map unavailable-map">
+        The inventory provider did not return a renderable seat layout.
+      </div>
+    );
+  }
+
+  const rows = Array.from(
+    map.seats.reduce((values, seat) => {
+      if (!values.has(seat.row)) values.set(seat.row, seat.y);
+      return values;
+    }, new Map<string, number>()),
+  ).sort((a, b) => a[1] - b[1]);
 
   return (
-    <div className="seat-map" aria-label="Seat map for the winning screening">
+    <div className="seat-map" aria-label="Live seat map for the winning screening">
       <div className="screen-wrap" aria-hidden="true">
         <span>SCREEN</span>
         <div className="screen" />
       </div>
-      <div className="seat-grid">
-        {rows.map((row, rowIndex) => (
-          <div className="seat-row" key={row}>
-            <span className="row-label">{row}</span>
-            <div className="seat-row-inner">
-              {Array.from({ length: 14 }, (_, columnIndex) => {
-                const label = `${row}${columnIndex + 1}`;
-                const sold =
-                  (rowIndex * 17 + columnIndex * 11 + screening.id.length) % 13 ===
-                    4 ||
-                  (row === "E" && [3, 12].includes(columnIndex + 1));
-                const accessible = row === "I" && [2, 13].includes(columnIndex + 1);
-                const state = selected.has(label)
-                  ? "selected"
-                  : sold
-                    ? "sold"
-                    : accessible
-                      ? "accessible"
-                      : "available";
-                return (
-                  <span
-                    aria-label={`${label}, ${state}`}
-                    className={`seat ${state}`}
-                    key={label}
-                    role="img"
-                    title={`${label} · ${state}`}
-                  />
-                );
-              })}
-            </div>
-            <span className="row-label">{row}</span>
-          </div>
+      <div className="seat-map-stage">
+        <div
+          className="geometry-centerline"
+          style={{ left: `${6 + map.target.x * 88}%` }}
+          aria-hidden="true"
+        />
+        <div
+          className="geometry-target"
+          style={{ left: `${6 + map.target.x * 88}%`, top: `${8 + map.target.y * 82}%` }}
+          aria-hidden="true"
+        >
+          <span>target</span>
+        </div>
+        {rows.map(([row, y]) => (
+          <span className="map-row-label" key={row} style={{ top: `${8 + y * 82}%` }}>{row}</span>
         ))}
+        {map.seats.map((seat) => {
+          const isSelected = selected.has(seat.id);
+          const accessible = seat.type === "wheelchair" || seat.type === "companion";
+          return (
+            <span
+              aria-label={`${seat.label}, ${isSelected ? "recommended" : statusLabel[seat.status]}${accessible ? ", accessible" : ""}`}
+              className={`map-seat status-${seat.status}${isSelected ? " recommended" : ""}${accessible ? " accessible-seat" : ""}`}
+              key={seat.id}
+              role="img"
+              style={{ left: `${6 + seat.x * 88}%`, top: `${8 + seat.y * 82}%` }}
+              title={`${seat.label} · ${isSelected ? "recommended" : statusLabel[seat.status]}`}
+            >
+              {isSelected ? <b>{seat.label}</b> : null}
+            </span>
+          );
+        })}
       </div>
       <div className="seat-legend" aria-label="Seat map legend">
-        <span><i className="seat available" />Available</span>
-        <span><i className="seat selected" />Your best</span>
-        <span><i className="seat sold" />Unavailable</span>
-        <span><i className="seat accessible" />Accessible</span>
+        <span><i className="map-seat status-available" />Available</span>
+        <span><i className="map-seat status-sold" />Occupied</span>
+        <span><i className="map-seat status-held" />Held</span>
+        <span><i className="map-seat status-house" />Blocked</span>
+        <span><i className="map-seat recommended" />Your best</span>
+        <span><i className="map-seat accessible-seat" />Accessible</span>
+      </div>
+      <div className="map-confidence">
+        <span>Centerline and target are derived from provider geometry</span>
+        <b>{map.confidence.replaceAll("_", " ")}</b>
       </div>
     </div>
   );

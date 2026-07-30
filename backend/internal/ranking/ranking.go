@@ -59,9 +59,13 @@ func eligible(seat domain.Seat, q domain.QueryRequest) bool {
 }
 
 func BestBlock(showtime domain.Showtime, inventory domain.Inventory, q domain.QueryRequest) (domain.Recommendation, bool) {
+	if !meetsMinimumConfidence(inventory.Confidence, q.MinimumGeometryConfidence) {
+		return domain.Recommendation{}, false
+	}
+	excludedRows := firstRows(inventory.Seats, q.ExcludeFirstRows)
 	rows := map[string][]domain.Seat{}
 	for _, seat := range inventory.Seats {
-		if eligible(seat, q) {
+		if !excludedRows[seat.Row] && eligible(seat, q) {
 			rows[seat.Row] = append(rows[seat.Row], seat)
 		}
 	}
@@ -123,13 +127,65 @@ func BestBlock(showtime domain.Showtime, inventory domain.Inventory, q domain.Qu
 	}
 	explanation := []string{
 		fmt.Sprintf("%s is the strongest contiguous block for the %s profile", labels, humanProfile(q.SeatProfile)),
+		fmt.Sprintf("Block center is x %.1f%% against a %.1f%% horizontal target", ((best[0].X+best[len(best)-1].X)/2)*100, target.X*100),
 		fmt.Sprintf("Row %s is %.0f%% of the way from the screen", best[0].Row, best[0].Y*100),
 		"Live availability was refreshed before this recommendation was returned",
 	}
 	return domain.Recommendation{
 		Showtime: showtime, Seats: best, Score: round2(score), Confidence: inventory.Confidence,
 		Explanation: explanation, ScoreBreakdown: bestParts, VerifiedAt: inventory.ObservedAt, BookingURL: showtime.BookingURL,
+		SeatMap: &domain.SeatMap{
+			Seats: inventory.Seats, Target: domain.GeometryPoint{X: target.X, Y: target.Y},
+			Confidence: inventory.Confidence, ObservedAt: inventory.ObservedAt,
+		},
 	}, true
+}
+
+func meetsMinimumConfidence(actual, minimum string) bool {
+	if minimum == "" {
+		return true
+	}
+	grade := map[string]int{
+		"label_heuristic":   1,
+		"row_geometry":      2,
+		"rendered_geometry": 3,
+		"exact_coordinates": 4,
+	}
+	return grade[actual] >= grade[minimum]
+}
+
+func firstRows(seats []domain.Seat, count int) map[string]bool {
+	excluded := map[string]bool{}
+	if count <= 0 {
+		return excluded
+	}
+	type rowPosition struct {
+		label string
+		y     float64
+	}
+	positions := map[string]float64{}
+	for _, seat := range seats {
+		if existing, ok := positions[seat.Row]; !ok || seat.Y < existing {
+			positions[seat.Row] = seat.Y
+		}
+	}
+	rows := make([]rowPosition, 0, len(positions))
+	for label, y := range positions {
+		rows = append(rows, rowPosition{label: label, y: y})
+	}
+	sort.Slice(rows, func(i, j int) bool {
+		if rows[i].y == rows[j].y {
+			return rows[i].label < rows[j].label
+		}
+		return rows[i].y < rows[j].y
+	})
+	if count > len(rows) {
+		count = len(rows)
+	}
+	for _, row := range rows[:count] {
+		excluded[row.label] = true
+	}
+	return excluded
 }
 
 func humanProfile(profile string) string {

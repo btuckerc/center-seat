@@ -76,9 +76,6 @@ func (q *QueryRequest) SetDefaults() {
 	if q.CandidateLimit == 0 {
 		q.CandidateLimit = 12
 	}
-	if q.ExcludeFirstRows == 0 {
-		q.ExcludeFirstRows = 1
-	}
 }
 
 func (q QueryRequest) Validate() error {
@@ -130,6 +127,16 @@ func (q QueryRequest) Validate() error {
 	if q.CandidateLimit < 1 || q.CandidateLimit > 25 {
 		return errors.New("candidate_limit must be between 1 and 25")
 	}
+	if q.MinStartNoticeMinutes < 0 || q.MinStartNoticeMinutes > 1440 {
+		return errors.New("min_start_notice_minutes must be between 0 and 1440")
+	}
+	if q.ExcludeFirstRows < 0 || q.ExcludeFirstRows > 10 {
+		return errors.New("exclude_first_rows must be between 0 and 10")
+	}
+	validConfidence := map[string]bool{"exact_coordinates": true, "rendered_geometry": true, "row_geometry": true, "label_heuristic": true}
+	if !validConfidence[q.MinimumGeometryConfidence] {
+		return fmt.Errorf("unsupported minimum_geometry_confidence %q", q.MinimumGeometryConfidence)
+	}
 	return nil
 }
 
@@ -149,13 +156,16 @@ type Showtime struct {
 	ReservedSeating   bool      `json:"reserved_seating"`
 	BookingURL        string    `json:"booking_url"`
 	InventoryProvider string    `json:"-"`
+	SeatLayoutID      string    `json:"-"`
+	ScreenID          string    `json:"-"`
+	SiteID            string    `json:"-"`
 }
 
 type Seat struct {
 	ID     string  `json:"id"`
 	Label  string  `json:"label"`
 	Row    string  `json:"row"`
-	Index  int     `json:"-"`
+	Index  int     `json:"index"`
 	X      float64 `json:"x"`
 	Y      float64 `json:"y"`
 	Type   string  `json:"type"`
@@ -180,6 +190,19 @@ type Recommendation struct {
 	ScoreBreakdown map[string]float64 `json:"score_breakdown"`
 	VerifiedAt     time.Time          `json:"verified_at"`
 	BookingURL     string             `json:"booking_url"`
+	SeatMap        *SeatMap           `json:"seat_map"`
+}
+
+type GeometryPoint struct {
+	X float64 `json:"x"`
+	Y float64 `json:"y"`
+}
+
+type SeatMap struct {
+	Seats      []Seat        `json:"seats"`
+	Target     GeometryPoint `json:"target"`
+	Confidence string        `json:"confidence"`
+	ObservedAt time.Time     `json:"observed_at"`
 }
 
 type Coverage struct {
@@ -203,9 +226,11 @@ type QueryResponse struct {
 }
 
 type ProviderStatus struct {
-	Name          string    `json:"name"`
-	Kind          string    `json:"kind"`
-	Status        string    `json:"status"`
-	Coverage      string    `json:"coverage"`
-	LastSuccessAt time.Time `json:"last_success_at"`
+	Name          string     `json:"name"`
+	Kind          string     `json:"kind"`
+	Status        string     `json:"status"`
+	Configured    bool       `json:"configured"`
+	Message       string     `json:"message,omitempty"`
+	Coverage      string     `json:"coverage,omitempty"`
+	LastSuccessAt *time.Time `json:"last_success_at,omitempty"`
 }

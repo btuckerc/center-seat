@@ -220,7 +220,7 @@ components:
           type: integer
           minimum: 0
           maximum: 10
-          default: 1
+          default: 0
         minimum_geometry_confidence:
           type: string
           enum: [exact_coordinates, rendered_geometry, row_geometry, label_heuristic]
@@ -317,7 +317,7 @@ components:
         - confidence
         - explanation
         - verified_at
-        - booking_url
+        - seat_map
       properties:
         rank:
           type: integer
@@ -349,6 +349,8 @@ components:
         booking_url:
           type: string
           format: uri
+        seat_map:
+          $ref: "#/components/schemas/SeatMap"
     Showtime:
       type: object
       required: [id, movie_title, venue_name, starts_at, format, distance_miles]
@@ -400,6 +402,34 @@ components:
         status:
           type: string
           enum: [available, sold, held, broken, house]
+    SeatMap:
+      type: object
+      required: [seats, target, confidence, observed_at]
+      properties:
+        seats:
+          type: array
+          items:
+            $ref: "#/components/schemas/Seat"
+        target:
+          $ref: "#/components/schemas/GeometryPoint"
+        confidence:
+          type: string
+          enum: [exact_coordinates, rendered_geometry, row_geometry, label_heuristic, visual_inference]
+        observed_at:
+          type: string
+          format: date-time
+    GeometryPoint:
+      type: object
+      required: [x, y]
+      properties:
+        x:
+          type: number
+          minimum: 0
+          maximum: 1
+        y:
+          type: number
+          minimum: 0
+          maximum: 1
     Coverage:
       type: object
       required: [screenings_discovered, screenings_pruned, inventories_checked, inventories_fresh, elapsed_ms]
@@ -418,7 +448,7 @@ components:
           type: integer
     ProviderStatus:
       type: object
-      required: [name, kind, status]
+      required: [name, kind, status, configured]
       properties:
         name:
           type: string
@@ -428,6 +458,10 @@ components:
         status:
           type: string
           enum: [healthy, degraded, disabled]
+        configured:
+          type: boolean
+        message:
+          type: string
         coverage:
           type: string
         last_success_at:

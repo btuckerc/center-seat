@@ -1,7 +1,21 @@
 # Provider integration
 
-CenterSeat treats discovery and seat inventory as separate capabilities because
-no universal public API reliably provides both.
+CenterSeat models discovery and seat inventory as separate capabilities even
+when one licensed platform supplies both. The first production adapter uses
+Vista Digital Platform / OCAPI for both roles.
+
+## Implemented Vista path
+
+The adapter performs server-side GAS token exchange, caches the bearer token,
+discovers showtimes for every business date in the requested range with bounded
+concurrency, loads seat layouts, overlays current seat availability, and repeats
+the winning availability read without preview mode. Layouts are cached separately
+from volatile seat status. Unknown status values fail closed as blocked seats.
+
+Required environment variables are `VISTA_API_BASE_URL`, `VISTA_AUTH_URL`,
+`VISTA_CLIENT_ID`, `VISTA_USERNAME`, and `VISTA_PASSWORD`. `VISTA_SITE_IDS` and
+`VISTA_REGION_CODE` can restrict scope. `VISTA_BOOKING_URL_TEMPLATE` is optional;
+without it, no booking link is returned.
 
 ## Discovery adapter
 
@@ -32,7 +46,7 @@ Required fields:
 - State (available, sold, held, broken, house)
 - Auditorium and screen boundary when supplied
 - Observation time and permitted cache lifetime
-- Direct booking link
+- Direct booking link when the provider supplies or contractually defines one
 
 Adapters declare a confidence grade: `exact_coordinates`,
 `rendered_geometry`, `row_geometry`, `label_heuristic`, or `visual_inference`.

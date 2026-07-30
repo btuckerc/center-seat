@@ -26,8 +26,12 @@ func main() {
 		return
 	}
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
-	provider := providers.Demo{}
-	svc := service.New(provider, provider, 6)
+	discovery, inventory, err := providers.FromEnvironment()
+	if err != nil {
+		logger.Error("provider configuration rejected", "error", err)
+		os.Exit(78)
+	}
+	svc := service.New(discovery, inventory, 6)
 	api := httpapi.New(svc, logger)
 	address := os.Getenv("CENTERSEAT_HTTP_ADDR")
 	if address == "" {
@@ -35,7 +39,7 @@ func main() {
 	}
 	server := &http.Server{
 		Addr: address, Handler: api.Handler(), ReadHeaderTimeout: 5 * time.Second,
-		ReadTimeout: 8 * time.Second, WriteTimeout: 12 * time.Second, IdleTimeout: 60 * time.Second,
+		ReadTimeout: 10 * time.Second, WriteTimeout: 20 * time.Second, IdleTimeout: 60 * time.Second,
 	}
 	go func() {
 		logger.Info("centerseat api listening", "address", address)
