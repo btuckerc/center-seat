@@ -7,6 +7,8 @@ services:
       dockerfile: Dockerfile.web
     environment:
       CENTERSEAT_API_URL: http://api:8080
+      OPEN_CINEMA_API_BASE_URL: ${OPEN_CINEMA_API_BASE_URL:-https://opencinema.app}
+      OPEN_CINEMA_API_KEY: ${OPEN_CINEMA_API_KEY:-}
     ports:
       - "3000:3000"
     depends_on:
@@ -19,9 +21,11 @@ services:
     environment:
       CENTERSEAT_HTTP_ADDR: :8080
       CENTERSEAT_ENV: production
-      CENTERSEAT_PROVIDER_MODE: atom
+      CENTERSEAT_PROVIDER_MODE: ${CENTERSEAT_PROVIDER_MODE:-opencinema}
+      OPEN_CINEMA_API_BASE_URL: ${OPEN_CINEMA_API_BASE_URL:-https://opencinema.app}
+      OPEN_CINEMA_API_KEY: ${OPEN_CINEMA_API_KEY:-}
       ATOM_API_BASE_URL: ${ATOM_API_BASE_URL:-https://api.atomtickets.com}
-      ATOM_API_KEY: ${ATOM_API_KEY:?required}
+      ATOM_API_KEY: ${ATOM_API_KEY:-}
       ATOM_PARTNER_ID: ${ATOM_PARTNER_ID:-}
       DATABASE_URL: postgres://centerseat:${POSTGRES_PASSWORD:?required}@postgres:5432/centerseat?sslmode=disable
       REDIS_URL: redis://redis:6379/0

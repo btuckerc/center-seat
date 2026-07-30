@@ -54,6 +54,9 @@ export type Showtime = {
   total_price?: number;
   currency?: string;
   amenities?: string[];
+  captions?: string;
+  audio_description?: boolean;
+  booking_url?: string;
 };
 
 export type Recommendation = {
@@ -89,6 +92,16 @@ export type SeatQueryResponse = {
   };
   winner: Recommendation | null;
   alternatives: Recommendation[];
+  warnings?: string[];
+};
+
+export type ShowtimeQueryResponse = {
+  query_id: string;
+  status: "complete" | "no_match";
+  generated_at: string;
+  expires_at: string;
+  coverage: SeatQueryResponse["coverage"];
+  showtimes: Showtime[];
   warnings?: string[];
 };
 

@@ -6,7 +6,8 @@ provider adapters and stores scale independently.
 
 ```text
 Client
-  │ POST /v1/seat-queries
+  ├─ POST /v1/showtime-queries ── real discovery without seat claims
+  │ POST /v1/seat-queries ─────── exact-seat query when inventory is connected
   ▼
 HTTP contract ── idempotency / validation / request ID / ETag
   ▼

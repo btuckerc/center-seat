@@ -134,6 +134,11 @@ a:focus-visible {
   background: #f0c765;
 }
 
+.network-status.discovery i {
+  background: #69c8e8;
+  box-shadow: 0 0 0 4px rgba(105, 200, 232, 0.1);
+}
+
 @keyframes pulse {
   to { opacity: 0.35; }
 }
@@ -703,6 +708,14 @@ a:focus-visible {
   color: #53600f;
 }
 
+.connection-state.discovery-state {
+  border-left-color: #3185a0;
+}
+
+.connection-state.discovery-state > span {
+  color: #23657a;
+}
+
 .connection-requirements {
   display: flex;
   flex-wrap: wrap;
@@ -810,6 +823,10 @@ a:focus-visible {
 
 .coverage-strip .verified {
   color: #4e5b12;
+}
+
+.coverage-strip .discovery-only {
+  color: #23657a;
 }
 
 .coverage-strip small {
@@ -1329,6 +1346,84 @@ a:focus-visible {
   grid-template-columns: repeat(3, 1fr);
 }
 
+.showtime-grid {
+  display: grid;
+  gap: 14px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  margin-top: 15px;
+}
+
+.showtime-card {
+  background: var(--paper-bright);
+  border: 1px solid #d0d0c8;
+  min-width: 0;
+  padding: 24px;
+}
+
+.showtime-card-head,
+.showtime-card-facts {
+  align-items: center;
+  display: flex;
+  justify-content: space-between;
+}
+
+.showtime-card-head > span {
+  color: #23657a;
+  font-family: var(--font-mono);
+  font-size: 7px;
+  font-weight: 700;
+  letter-spacing: .07em;
+}
+
+.showtime-card-head > b {
+  font-family: var(--font-mono);
+  font-size: 16px;
+  font-weight: 500;
+}
+
+.showtime-card h3 {
+  font-size: 25px;
+  font-weight: 550;
+  letter-spacing: -.035em;
+  line-height: 1.05;
+  margin: 32px 0 8px;
+}
+
+.showtime-card > p {
+  color: #666a68;
+  font-size: 12px;
+  margin: 0 0 25px;
+}
+
+.showtime-card-facts {
+  border-bottom: 1px solid #d2d2ca;
+  border-top: 1px solid #d2d2ca;
+  font-family: var(--font-mono);
+  font-size: 8px;
+  padding: 13px 0;
+  text-transform: uppercase;
+}
+
+.showtime-card > a,
+.showtime-card > small {
+  color: var(--ink);
+  display: flex;
+  font-size: 10px;
+  font-weight: 650;
+  justify-content: space-between;
+  margin-top: 20px;
+  text-decoration: none;
+}
+
+.showtime-card > a:hover {
+  color: #23657a;
+}
+
+.showtime-card > small {
+  color: #858783;
+  font-weight: 500;
+}
+
 .alternative-card {
   background: #e8e8e1;
   border: 1px solid #d0d0c8;
@@ -1598,6 +1693,10 @@ footer > span {
   }
 
   .alternative-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .showtime-grid {
     grid-template-columns: 1fr;
   }
 

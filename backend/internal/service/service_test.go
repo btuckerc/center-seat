@@ -57,3 +57,32 @@ func TestOutsideTimeWindow(t *testing.T) {
 		t.Fatalf("winner %s is inside excluded window", clock)
 	}
 }
+
+func TestShowtimesReturnsDiscoveryWithoutClaimingSeatInventory(t *testing.T) {
+	provider := testfixtures.Provider{}
+	svc := New(provider, NewUnsupportedInventoryForTest(), 2)
+	today := time.Now().Format(time.DateOnly)
+	q := domain.QueryRequest{
+		MovieQuery: "The Test Film", Location: domain.LocationConstraint{Query: "Charlotte", Latitude: 35.2271, Longitude: -80.8431, RadiusMiles: 25},
+		Dates: domain.DateConstraint{Start: today, End: today}, TicketCount: 1, SeatProfile: "balanced",
+		MaxDistanceMiles: 25, CandidateLimit: 12,
+	}
+	result, err := svc.Showtimes(context.Background(), "stq_test", q)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Showtimes) == 0 || result.Coverage.InventoriesChecked != 0 {
+		t.Fatalf("expected discovery-only response, got %#v", result)
+	}
+}
+
+type unsupportedInventoryForTest struct{}
+
+func NewUnsupportedInventoryForTest() unsupportedInventoryForTest {
+	return unsupportedInventoryForTest{}
+}
+func (unsupportedInventoryForTest) Name() string                  { return "unavailable" }
+func (unsupportedInventoryForTest) Supports(domain.Showtime) bool { return false }
+func (unsupportedInventoryForTest) GetAvailability(context.Context, domain.Showtime, bool) (domain.Inventory, error) {
+	return domain.Inventory{}, nil
+}

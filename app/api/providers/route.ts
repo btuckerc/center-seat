@@ -1,14 +1,11 @@
+import { openCinemaProviderStatuses } from "../../lib/opencinema";
+
 export async function GET() {
   const apiBase = process.env.CENTERSEAT_API_URL?.replace(/\/$/, "");
   if (!apiBase || !/^https?:\/\//.test(apiBase)) {
-    return Response.json(
-      {
-        providers: [],
-        configured: false,
-        message: "No licensed live-inventory service is connected.",
-      },
-      { status: 503 },
-    );
+    const providers = await openCinemaProviderStatuses();
+    if (providers.length) return Response.json({ providers, configured: true }, { headers: { "Cache-Control": "no-store" } });
+    return Response.json({ providers: [], configured: false, message: "No live provider is connected." }, { status: 503 });
   }
   try {
     const upstream = await fetch(`${apiBase}/v1/providers`, {

@@ -26,3 +26,11 @@ func TestAtomModeRequiresAPIKey(t *testing.T) {
 		t.Fatal("expected missing Atom key to fail before startup")
 	}
 }
+
+func TestOpenCinemaModeRequiresAPIKey(t *testing.T) {
+	t.Setenv("CENTERSEAT_PROVIDER_MODE", "opencinema")
+	t.Setenv("OPEN_CINEMA_API_KEY", "")
+	if _, _, err := FromEnvironment(); err == nil {
+		t.Fatal("expected missing Open Cinema key to fail before startup")
+	}
+}

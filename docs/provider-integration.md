@@ -1,10 +1,24 @@
 # Provider integration
 
 CenterSeat models discovery and seat inventory as separate capabilities even
-when one licensed platform supplies both. The production adapter uses the Atom
-Tickets Partner API for both roles.
+when one platform supplies both. The default discovery adapter now uses Open
+Cinema; Atom remains an optional full-inventory adapter.
 
-## Implemented Atom path
+## Implemented Open Cinema path
+
+Open Cinema issues self-service API keys and provides live indie, repertory, and
+arthouse screenings with provider checkout links. CenterSeat authenticates
+server-side, performs one title-and-location query with cursor pagination,
+normalizes formats and accessibility fields, filters the complete requested date
+range in theater-local time, and rejects unsafe or placeholder checkout URLs.
+
+Open Cinema does not expose auditorium layouts or live seat states. Its
+showtimes therefore have no inventory provider, never enter the exact-seat
+ranking path, and are returned through the discovery-only endpoint with an
+explicit warning. `OPEN_CINEMA_API_KEY` is required and
+`OPEN_CINEMA_API_BASE_URL` defaults to `https://opencinema.app`.
+
+## Optional Atom path
 
 The adapter authenticates with Atom's server-side `x-api-key`, looks up nearby
 supported venues, batches multi-venue showtime discovery in Atom's seven-day
@@ -65,3 +79,6 @@ Do not use an order or seat hold as an availability probe. Do not make
 unauthorized scraping a required production dependency. Purchase support should
 be a separate, explicit workflow with new threat modeling, confirmation,
 payment, and cleanup semantics.
+
+The disabled Fandango research bookmark and local HAR-analysis procedure live in
+`docs/fandango-research.md`. Captures are never replayed by the analyzer.

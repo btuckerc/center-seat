@@ -231,6 +231,16 @@ type QueryResponse struct {
 	Warnings     []string         `json:"warnings,omitempty"`
 }
 
+type ShowtimeQueryResponse struct {
+	QueryID     string     `json:"query_id"`
+	Status      string     `json:"status"`
+	GeneratedAt time.Time  `json:"generated_at"`
+	ExpiresAt   time.Time  `json:"expires_at"`
+	Coverage    Coverage   `json:"coverage"`
+	Showtimes   []Showtime `json:"showtimes"`
+	Warnings    []string   `json:"warnings,omitempty"`
+}
+
 type ProviderStatus struct {
 	Name          string     `json:"name"`
 	Kind          string     `json:"kind"`

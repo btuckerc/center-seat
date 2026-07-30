@@ -10,6 +10,36 @@ servers:
   - url: http://localhost:8080
     description: Local Docker service
 paths:
+  /v1/showtime-queries:
+    post:
+      operationId: createShowtimeQuery
+      summary: Discover real screenings when live per-seat inventory is unavailable
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SeatQueryRequest"
+      responses:
+        "200":
+          description: Live showtime discovery results without seat claims
+          headers:
+            ETag:
+              $ref: "#/components/headers/ETag"
+            X-Request-ID:
+              $ref: "#/components/headers/RequestID"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ShowtimeQueryResponse"
+        "400":
+          $ref: "#/components/responses/Problem"
+        "422":
+          $ref: "#/components/responses/Problem"
+        "503":
+          $ref: "#/components/responses/Problem"
   /v1/seat-queries:
     post:
       operationId: createSeatQuery
@@ -303,6 +333,31 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/Recommendation"
+        warnings:
+          type: array
+          items:
+            type: string
+    ShowtimeQueryResponse:
+      type: object
+      required: [query_id, status, generated_at, expires_at, coverage, showtimes]
+      properties:
+        query_id:
+          type: string
+        status:
+          type: string
+          enum: [complete, no_match]
+        generated_at:
+          type: string
+          format: date-time
+        expires_at:
+          type: string
+          format: date-time
+        coverage:
+          $ref: "#/components/schemas/Coverage"
+        showtimes:
+          type: array
+          items:
+            $ref: "#/components/schemas/Showtime"
         warnings:
           type: array
           items:

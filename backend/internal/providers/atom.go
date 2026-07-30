@@ -740,6 +740,7 @@ func haversineMiles(lat1, lon1, lat2, lon2 float64) float64 {
 
 func classifyAttributes(values []string, requires3D bool) (string, []string, string, bool) {
 	joined := strings.ToLower(strings.Join(values, " "))
+	joined = strings.NewReplacer("_", " ", "-", " ").Replace(joined)
 	format := "standard"
 	for _, candidate := range []string{"imax", "dolby", "screenx", "rpdx", "xd"} {
 		if strings.Contains(joined, candidate) {
@@ -767,6 +768,6 @@ func classifyAttributes(values []string, requires3D bool) (string, []string, str
 	} else if strings.Contains(joined, "closed caption") || strings.Contains(joined, " cc ") || strings.HasPrefix(joined, "cc ") {
 		captions = "closed"
 	}
-	audio := strings.Contains(joined, "audio description") || strings.Contains(joined, "descriptive audio") || strings.Contains(joined, "dvs")
+	audio := strings.Contains(joined, "audio description") || strings.Contains(joined, "audio desc") || strings.Contains(joined, "descriptive audio") || strings.Contains(joined, "dvs")
 	return format, amenities, captions, audio
 }

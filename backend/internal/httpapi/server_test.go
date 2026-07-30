@@ -56,3 +56,27 @@ func TestCreateQueryIsIdempotentAndCacheable(t *testing.T) {
 		t.Fatalf("expected 304, got %d", rec.Code)
 	}
 }
+
+func TestCreateShowtimeQueryReturnsDiscoveryResults(t *testing.T) {
+	provider := testfixtures.Provider{}
+	server := New(service.New(provider, provider, 3), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	today := time.Now().Format(time.DateOnly)
+	payload, _ := json.Marshal(domain.QueryRequest{
+		MovieQuery: "Test Film", Location: domain.LocationConstraint{Query: "Charlotte", Latitude: 35.2271, Longitude: -80.8431, RadiusMiles: 25},
+		Dates: domain.DateConstraint{Start: today, End: today}, TicketCount: 1, SeatProfile: "balanced", CandidateLimit: 10, MaxDistanceMiles: 25,
+	})
+	req := httptest.NewRequest(http.MethodPost, "/v1/showtime-queries", bytes.NewReader(payload))
+	req.Header.Set("Idempotency-Key", "showtime-key-123")
+	rec := httptest.NewRecorder()
+	server.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
+	}
+	var response domain.ShowtimeQueryResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if len(response.Showtimes) == 0 || response.QueryID == "" {
+		t.Fatalf("expected live showtime results, got %#v", response)
+	}
+}

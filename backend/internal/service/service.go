@@ -158,12 +158,46 @@ func (s *Service) Query(ctx context.Context, queryID string, q domain.QueryReque
 	return response, nil
 }
 
+func (s *Service) Showtimes(ctx context.Context, queryID string, q domain.QueryRequest) (domain.ShowtimeQueryResponse, error) {
+	started := time.Now()
+	q.SetDefaults()
+	if err := q.Validate(); err != nil {
+		return domain.ShowtimeQueryResponse{}, err
+	}
+	discoveryCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
+	showtimes, err := s.discovery.Discover(discoveryCtx, q)
+	cancel()
+	if err != nil {
+		return domain.ShowtimeQueryResponse{}, fmt.Errorf("discover showtimes: %w", err)
+	}
+	filtered := filterShowtimes(showtimes, q, false)
+	now := time.Now().UTC()
+	status := "complete"
+	warnings := []string{"Open Cinema supplies live showtimes and checkout links, but not per-seat availability"}
+	if len(filtered) == 0 {
+		status = "no_match"
+		warnings = append(warnings, "No screenings matched every discovery constraint")
+	}
+	return domain.ShowtimeQueryResponse{
+		QueryID: queryID, Status: status, GeneratedAt: now, ExpiresAt: now.Add(5 * time.Minute),
+		Coverage: domain.Coverage{
+			ScreeningsDiscovered: len(showtimes), ScreeningsPruned: len(filtered),
+			ElapsedMS: int(time.Since(started).Milliseconds()),
+		},
+		Showtimes: filtered, Warnings: warnings,
+	}, nil
+}
+
 func filterAndPrune(showtimes []domain.Showtime, q domain.QueryRequest) []domain.Showtime {
+	return filterShowtimes(showtimes, q, true)
+}
+
+func filterShowtimes(showtimes []domain.Showtime, q domain.QueryRequest, requireReservedSeating bool) []domain.Showtime {
 	formats := toSet(q.Formats)
 	amenities := toSet(q.AmenitiesRequired)
 	result := make([]domain.Showtime, 0, len(showtimes))
 	for _, st := range showtimes {
-		if !st.ReservedSeating || st.DistanceMiles > q.MaxDistanceMiles {
+		if (requireReservedSeating && !st.ReservedSeating) || st.DistanceMiles > q.MaxDistanceMiles {
 			continue
 		}
 		if q.MinStartNoticeMinutes > 0 && st.StartsAt.Before(time.Now().Add(time.Duration(q.MinStartNoticeMinutes)*time.Minute)) {

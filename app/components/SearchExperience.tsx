@@ -7,6 +7,8 @@ import {
   type Recommendation,
   type SeatProfile,
   type SeatQueryResponse,
+  type Showtime,
+  type ShowtimeQueryResponse,
   type TimeMode,
 } from "../lib/api";
 import { SeatMap } from "./SeatMap";
@@ -28,7 +30,7 @@ const profiles: { value: SeatProfile; label: string; hint: string }[] = [
   { value: "back", label: "Back rows", hint: "More distance" },
 ];
 
-type ProviderState = "checking" | "ready" | "unconfigured" | "unavailable";
+type ProviderState = "checking" | "ready" | "discovery" | "unconfigured" | "unavailable";
 type Problem = { title: string; detail: string; status?: number };
 
 function FieldLabel({ number, children }: { number?: string; children: React.ReactNode }) {
@@ -52,6 +54,15 @@ const showtimeLabels = (recommendation: Recommendation) => ({
   ),
 });
 
+const screeningLabels = (showtime: Showtime) => ({
+  date: new Intl.DateTimeFormat(undefined, { weekday: "short", month: "short", day: "numeric" }).format(
+    new Date(showtime.starts_at),
+  ),
+  time: new Intl.DateTimeFormat(undefined, { hour: "numeric", minute: "2-digit" }).format(
+    new Date(showtime.starts_at),
+  ),
+});
+
 const humanize = (value: string) =>
   value.replaceAll("_", " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
 
@@ -59,6 +70,7 @@ export function SearchExperience() {
   const [draft, setDraft] = useState<QueryState>(() => createDefaultQuery());
   const [applied, setApplied] = useState<QueryState | null>(null);
   const [result, setResult] = useState<SeatQueryResponse | null>(null);
+  const [showtimeResult, setShowtimeResult] = useState<ShowtimeQueryResponse | null>(null);
   const [problem, setProblem] = useState<Problem | null>(null);
   const [providerState, setProviderState] = useState<ProviderState>("checking");
   const [searching, setSearching] = useState(false);
@@ -71,16 +83,16 @@ export function SearchExperience() {
     fetch("/api/providers", { cache: "no-store" })
       .then(async (response) => {
         const payload = (await response.json()) as {
-          providers?: Array<{ configured: boolean; status: string }>;
+          providers?: Array<{ configured: boolean; status: string; kind: string }>;
         };
         if (!active) return;
         const statuses = payload.providers ?? [];
-        if (
-          response.ok &&
-          statuses.length >= 2 &&
-          statuses.every((provider) => provider.configured && provider.status === "healthy")
-        ) {
+        const discoveryReady = statuses.some((provider) => provider.kind === "discovery" && provider.configured && provider.status === "healthy");
+        const inventoryReady = statuses.some((provider) => provider.kind === "inventory" && provider.configured && provider.status === "healthy");
+        if (response.ok && discoveryReady && inventoryReady) {
           setProviderState("ready");
+        } else if (response.ok && discoveryReady) {
+          setProviderState("discovery");
         } else {
           setProviderState("unconfigured");
         }
@@ -121,7 +133,7 @@ export function SearchExperience() {
         setLocating(false);
       },
       () => {
-        setLocationProblem("Location permission was not granted. Atom requires coordinates to search nearby theaters.");
+        setLocationProblem("Location permission was not granted. Live nearby-showtime sources require coordinates.");
         setLocating(false);
       },
       { enableHighAccuracy: true, timeout: 10_000, maximumAge: 300_000 },
@@ -130,7 +142,7 @@ export function SearchExperience() {
 
   const search = async (event: FormEvent) => {
     event.preventDefault();
-    if (providerState !== "ready" || searching) return;
+    if ((providerState !== "ready" && providerState !== "discovery") || searching) return;
     if (draft.dateEnd < draft.dateStart) {
       setProblem({ title: "Invalid date range", detail: "The end date must be on or after the start date." });
       return;
@@ -138,6 +150,7 @@ export function SearchExperience() {
     setSearching(true);
     setProblem(null);
     setResult(null);
+    setShowtimeResult(null);
     const payload = {
       movie_query: draft.movie.trim(),
       location: {
@@ -170,7 +183,8 @@ export function SearchExperience() {
       candidate_limit: 12,
     };
     try {
-      const response = await fetch("/api/seat-queries", {
+      const endpoint = providerState === "ready" ? "/api/seat-queries" : "/api/showtime-queries";
+      const response = await fetch(endpoint, {
         method: "POST",
         headers: { "Content-Type": "application/json", "Idempotency-Key": crypto.randomUUID() },
         body: JSON.stringify(payload),
@@ -184,7 +198,8 @@ export function SearchExperience() {
         });
       } else {
         setApplied({ ...draft });
-        setResult(body as SeatQueryResponse);
+        if (providerState === "ready") setResult(body as SeatQueryResponse);
+        else setShowtimeResult(body as ShowtimeQueryResponse);
         requestAnimationFrame(() =>
           document.getElementById("results")?.scrollIntoView({ behavior: "smooth", block: "start" }),
         );
@@ -192,7 +207,7 @@ export function SearchExperience() {
     } catch {
       setProblem({
         title: "Live query unavailable",
-        detail: "CenterSeat could not reach the licensed inventory service. No substitute result was returned.",
+        detail: "CenterSeat could not reach the configured live source. No substitute result was returned.",
       });
     } finally {
       setSearching(false);
@@ -208,18 +223,23 @@ export function SearchExperience() {
 
   const providerText = {
     checking: "Checking live providers",
-    ready: "Licensed providers connected",
+    ready: "Showtimes + seats connected",
+    discovery: "Live showtimes connected",
     unconfigured: "Provider setup required",
     unavailable: "Provider health unavailable",
   }[providerState];
 
   const searchText = searching
-    ? "Querying licensed providers…"
+    ? "Querying live providers…"
     : providerState === "ready"
       ? draft.latitude === undefined || draft.longitude === undefined
         ? "Use precise location to continue"
         : "Find live seats"
-      : "Connect live providers to search";
+      : providerState === "discovery"
+        ? draft.latitude === undefined || draft.longitude === undefined
+          ? "Use precise location to continue"
+          : "Find live showtimes"
+        : "Connect live providers to search";
 
   return (
     <main>
@@ -238,11 +258,11 @@ export function SearchExperience() {
           <div className="eyebrow"><span>01</span> Seat intelligence, not another showtime list</div>
           <h1>Find the one<br />worth booking.</h1>
           <p>
-            Query licensed showtimes across a date range, compare live seat inventory,
-            and get one exact recommendation based on the theater&apos;s real geometry.
+            Query real showtimes across a date range. When live seat inventory is available,
+            get one exact recommendation based on the theater&apos;s real geometry.
           </p>
           <div className="hero-proof">
-            <div><strong>LIVE</strong><span>licensed inventory only</span></div>
+            <div><strong>LIVE</strong><span>authorized sources only</span></div>
             <div><strong>FINAL</strong><span>winner reverified</span></div>
             <div><strong>0</strong><span>seat holds created</span></div>
           </div>
@@ -254,12 +274,17 @@ export function SearchExperience() {
             <span className="read-only-badge">READ ONLY</span>
           </div>
 
-          {providerState !== "ready" ? (
+          {providerState === "discovery" ? (
             <div className="provider-warning" role="status">
               <b>{providerText}</b>
               <span>
-                CenterSeat is refusing to show fabricated inventory. An Atom Tickets Partner API key and the production query service must be connected before search is enabled. <a href="https://www.atomtickets.com/partnerships" target="_blank" rel="noreferrer">Request partner access ↗</a>
+                Open Cinema discovery is connected. Searches return real indie and repertory screenings, but make no seat-availability claim until a separate inventory source is connected. <a href="https://opencinema.app/developers" target="_blank" rel="noreferrer">Open Cinema data ↗</a>
               </span>
+            </div>
+          ) : providerState !== "ready" ? (
+            <div className="provider-warning" role="status">
+              <b>{providerText}</b>
+              <span>CenterSeat is refusing to show fabricated results. Configure the self-service Open Cinema API key to enable real showtime discovery.</span>
             </div>
           ) : null}
 
@@ -374,10 +399,10 @@ export function SearchExperience() {
             </div>
           </details>
 
-          <button className="search-button" disabled={searching || providerState !== "ready" || !draft.movie.trim() || !draft.location.trim() || draft.latitude === undefined || draft.longitude === undefined || draft.formats.length === 0} type="submit">
+          <button className="search-button" disabled={searching || (providerState !== "ready" && providerState !== "discovery") || !draft.movie.trim() || !draft.location.trim() || draft.latitude === undefined || draft.longitude === undefined || draft.formats.length === 0} type="submit">
             <span>{searchText}</span><b>{searching ? <i className="button-spinner" /> : "→"}</b>
           </button>
-          <p className="query-note">No demo fallback. No holds. The winning live map is rechecked before it is returned.</p>
+          <p className="query-note">No demo fallback. No holds. Discovery-only results are labeled and never presented as seat availability.</p>
         </form>
       </section>
 
@@ -386,7 +411,7 @@ export function SearchExperience() {
           <div>
             <span className="eyebrow dark"><span>02</span> Live recommendation</span>
             <h2>{applied?.movie || "Awaiting a live query"}</h2>
-            <p>{applied ? `${dateLabel(applied.dateStart)} through ${dateLabel(applied.dateEnd)} · ${applied.tickets} ${applied.tickets === 1 ? "seat" : "seats"} near ${applied.location}` : "Results appear only after licensed providers respond."}</p>
+            <p>{applied ? `${dateLabel(applied.dateStart)} through ${dateLabel(applied.dateEnd)} · ${applied.tickets} ${applied.tickets === 1 ? "seat" : "seats"} near ${applied.location}` : "Results appear only after configured live providers respond."}</p>
           </div>
           {applied ? <button className="copy-button" onClick={copyQuery} type="button">{copied ? "Copied query" : "Copy reproducible query"}</button> : null}
         </div>
@@ -395,8 +420,12 @@ export function SearchExperience() {
           <div className="connection-state error-state" role="alert"><span>LIVE QUERY STOPPED</span><h3>{problem.title}</h3><p>{problem.detail}</p>{problem.status ? <small>HTTP {problem.status} · no substitute result returned</small> : null}</div>
         ) : null}
 
-        {!problem && providerState !== "ready" ? (
-          <div className="connection-state"><span>PRODUCTION SAFETY</span><h3>Live inventory is not connected yet.</h3><p>The previous synthetic results have been removed. Search will remain disabled until the licensed provider service is configured and healthy.</p><div className="connection-requirements"><b>Required</b><span>Atom Partner API key</span><span>Precise location</span><span>Production API deployment</span></div></div>
+        {!problem && providerState !== "ready" && providerState !== "discovery" ? (
+          <div className="connection-state"><span>PRODUCTION SAFETY</span><h3>Live discovery is not connected yet.</h3><p>Synthetic results remain disabled. Configure Open Cinema to browse real screenings without claiming seat availability.</p><div className="connection-requirements"><b>Required</b><span>Open Cinema API key</span><span>Precise location</span><span>Server-side configuration</span></div></div>
+        ) : null}
+
+        {!problem && providerState === "discovery" && !showtimeResult ? (
+          <div className="connection-state discovery-state"><span>DISCOVERY READY</span><h3>Real showtimes are connected.</h3><p>Run a query to browse Open Cinema coverage. Exact-seat ranking stays disabled until live inventory is connected.</p></div>
         ) : null}
 
         {!problem && providerState === "ready" && !result ? (
@@ -404,6 +433,8 @@ export function SearchExperience() {
         ) : null}
 
         {result?.winner ? <LiveResult result={result} /> : null}
+
+        {showtimeResult ? <ShowtimeResults result={showtimeResult} /> : null}
 
         {result && !result.winner ? (
           <div className="empty-result"><span>NO EXACT MATCH</span><h3>No live seat satisfied every constraint.</h3><p>CenterSeat did not silently relax the date, time, format, accessibility, geometry, price, or distance rules.</p></div>
@@ -423,6 +454,37 @@ export function SearchExperience() {
 
       <footer><a className="brand footer-brand" href="#top"><span className="brand-mark">C</span><span>CENTERSEAT</span></a><p>Exact seats. Explicit constraints. No fabricated inventory.</p><span>QUERY RELEASE · 2026</span></footer>
     </main>
+  );
+}
+
+function ShowtimeResults({ result }: { result: ShowtimeQueryResponse }) {
+  return (
+    <>
+      <div className="coverage-strip" aria-label="Showtime query coverage">
+        <span><b>{result.coverage.screenings_discovered}</b> discovered</span><i>→</i>
+        <span><b>{result.showtimes.length}</b> matched constraints</span><i>→</i>
+        <span className="discovery-only"><b>0</b> seat maps claimed</span><small>Open Cinema Project</small>
+      </div>
+      {result.showtimes.length ? (
+        <div className="showtime-grid">
+          {result.showtimes.map((showtime) => {
+            const labels = screeningLabels(showtime);
+            return (
+              <article className="showtime-card" key={showtime.id}>
+                <div className="showtime-card-head"><span>LIVE SHOWTIME · SEATS PENDING</span><b>{labels.time}</b></div>
+                <h3>{showtime.movie_title}</h3>
+                <p>{showtime.venue_name}</p>
+                <div className="showtime-card-facts"><span>{labels.date}</span><span>{humanize(showtime.format)}</span><span>{showtime.distance_miles.toFixed(1)} mi</span></div>
+                {showtime.booking_url ? <a href={showtime.booking_url} target="_blank" rel="noreferrer">Open provider booking page <span>↗</span></a> : <small>No checkout link supplied</small>}
+              </article>
+            );
+          })}
+        </div>
+      ) : (
+        <div className="empty-result"><span>NO SHOWTIMES FOUND</span><h3>Open Cinema returned no matching screening.</h3><p>Its current coverage focuses on independent, repertory, and arthouse theaters; Charlotte returned no nearby records during provider validation.</p></div>
+      )}
+      {result.warnings?.length ? <div className="result-warnings">{result.warnings.map((warning) => <span key={warning}>{warning}</span>)}</div> : null}
+    </>
   );
 }
 

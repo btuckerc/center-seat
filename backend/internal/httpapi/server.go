@@ -51,6 +51,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /readyz", s.ready)
 	s.mux.HandleFunc("GET /metrics", s.metrics)
 	s.mux.HandleFunc("GET /v1/providers", s.providers)
+	s.mux.HandleFunc("POST /v1/showtime-queries", s.createShowtimeQuery)
 	s.mux.HandleFunc("POST /v1/seat-queries", s.createQuery)
 	s.mux.HandleFunc("GET /v1/seat-queries/{query_id}", s.getQuery)
 }
@@ -131,10 +132,14 @@ func (s *Server) createQuery(w http.ResponseWriter, r *http.Request) {
 	canonical, _ := json.Marshal(request)
 	hash := sha256.Sum256(canonical)
 	bodyHash := hex.EncodeToString(hash[:])
-	key := strings.TrimSpace(r.Header.Get("Idempotency-Key"))
-	if key != "" && (len(key) < 8 || len(key) > 128) {
+	rawKey := strings.TrimSpace(r.Header.Get("Idempotency-Key"))
+	if rawKey != "" && (len(rawKey) < 8 || len(rawKey) > 128) {
 		s.problem(w, r, http.StatusBadRequest, "Invalid Idempotency-Key", "Idempotency-Key must be 8 to 128 characters")
 		return
+	}
+	key := ""
+	if rawKey != "" {
+		key = "seat:" + rawKey
 	}
 	if key != "" {
 		s.mu.RLock()
@@ -168,8 +173,74 @@ func (s *Server) createQuery(w http.ResponseWriter, r *http.Request) {
 	serveCached(w, cached)
 }
 
+func (s *Server) createShowtimeQuery(w http.ResponseWriter, r *http.Request) {
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 1<<20))
+	if err != nil {
+		s.problem(w, r, http.StatusBadRequest, "Invalid request body", err.Error())
+		return
+	}
+	var request domain.QueryRequest
+	decoder := json.NewDecoder(strings.NewReader(string(body)))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&request); err != nil {
+		s.problem(w, r, http.StatusBadRequest, "Invalid JSON", err.Error())
+		return
+	}
+	request.SetDefaults()
+	if err := request.Validate(); err != nil {
+		s.problem(w, r, http.StatusUnprocessableEntity, "Query validation failed", err.Error())
+		return
+	}
+	canonical, _ := json.Marshal(request)
+	hash := sha256.Sum256(canonical)
+	bodyHash := hex.EncodeToString(hash[:])
+	rawKey := strings.TrimSpace(r.Header.Get("Idempotency-Key"))
+	if rawKey != "" && (len(rawKey) < 8 || len(rawKey) > 128) {
+		s.problem(w, r, http.StatusBadRequest, "Invalid Idempotency-Key", "Idempotency-Key must be 8 to 128 characters")
+		return
+	}
+	key := ""
+	if rawKey != "" {
+		key = "showtime:" + rawKey
+	}
+	if key != "" {
+		s.mu.RLock()
+		queryID, found := s.byKey[key]
+		cached, cachedFound := s.results[queryID]
+		s.mu.RUnlock()
+		if found && cachedFound {
+			if cached.bodyHash != bodyHash {
+				s.problem(w, r, http.StatusConflict, "Idempotency conflict", "This key was already used with a different request body")
+				return
+			}
+			serveCached(w, cached)
+			return
+		}
+	}
+	queryID := newID("stq")
+	response, err := s.service.Showtimes(r.Context(), queryID, request)
+	if err != nil {
+		s.problem(w, r, http.StatusServiceUnavailable, "Showtime query failed", err.Error())
+		return
+	}
+	encoded, _ := json.Marshal(response)
+	etagHash := sha256.Sum256(encoded)
+	cached := cachedResult{bodyHash: bodyHash, body: encoded, etag: `"` + hex.EncodeToString(etagHash[:12]) + `"`, expires: response.ExpiresAt}
+	s.mu.Lock()
+	s.results[queryID] = cached
+	if key != "" {
+		s.byKey[key] = queryID
+	}
+	s.mu.Unlock()
+	serveCached(w, cached)
+}
+
 func (s *Server) getQuery(w http.ResponseWriter, r *http.Request) {
 	queryID := r.PathValue("query_id")
+	if !strings.HasPrefix(queryID, "qry_") {
+		s.problem(w, r, http.StatusNotFound, "Query not found", "The query ID is unknown or has expired")
+		return
+	}
 	s.mu.RLock()
 	cached, ok := s.results[queryID]
 	s.mu.RUnlock()
