@@ -12,7 +12,7 @@ Client
 HTTP contract ── idempotency / validation / request ID / ETag
   ▼
 Query service
-  ├── cached discovery adapter ── licensed showtime feed
+  ├── cached discovery adapter ── configured showtime source
   ├── constraint planner ──────── local filtering and candidate scoring
   ├── bounded fan-out ─────────── live inventory adapters (5–12 candidates)
   ├── geometry ranker ─────────── contiguous blocks + confidence penalties
@@ -61,6 +61,9 @@ step. Production startup never selects fixture data implicitly.
 - Geometry confidence is part of ranking and the public explanation.
 - The final check is read-only. Query traffic never manipulates market
   availability by holding seats.
+- The personal Fandango adapter is rejected outside local/development mode and
+  has no code path for token, reservation, cart, wallet, payment, or purchase
+  operations.
 - JSON logs, health checks, readiness checks, and Prometheus metrics are built
   into the service surface.
 

@@ -193,7 +193,7 @@ export function SearchExperience() {
       if (!response.ok) {
         setProblem({
           title: body.title ?? "Live query failed",
-          detail: body.detail ?? "The licensed provider did not return a usable response.",
+          detail: body.detail ?? "The configured provider did not return a usable response.",
           status: response.status,
         });
       } else {
@@ -262,7 +262,7 @@ export function SearchExperience() {
             get one exact recommendation based on the theater&apos;s real geometry.
           </p>
           <div className="hero-proof">
-            <div><strong>LIVE</strong><span>authorized sources only</span></div>
+            <div><strong>LIVE</strong><span>configured sources only</span></div>
             <div><strong>FINAL</strong><span>winner reverified</span></div>
             <div><strong>0</strong><span>seat holds created</span></div>
           </div>
@@ -284,7 +284,7 @@ export function SearchExperience() {
           ) : providerState !== "ready" ? (
             <div className="provider-warning" role="status">
               <b>{providerText}</b>
-              <span>CenterSeat is refusing to show fabricated results. Configure the self-service Open Cinema API key to enable real showtime discovery.</span>
+              <span>CenterSeat is refusing to show fabricated results. Configure a supported live provider, or start the personal read-only provider locally.</span>
             </div>
           ) : null}
 
@@ -421,11 +421,11 @@ export function SearchExperience() {
         ) : null}
 
         {!problem && providerState !== "ready" && providerState !== "discovery" ? (
-          <div className="connection-state"><span>PRODUCTION SAFETY</span><h3>Live discovery is not connected yet.</h3><p>Synthetic results remain disabled. Configure Open Cinema to browse real screenings without claiming seat availability.</p><div className="connection-requirements"><b>Required</b><span>Open Cinema API key</span><span>Precise location</span><span>Server-side configuration</span></div></div>
+          <div className="connection-state"><span>PRODUCTION SAFETY</span><h3>Live discovery is not connected yet.</h3><p>Synthetic results remain disabled. Configure Open Cinema for discovery, or run the personal Fandango provider locally for exact seat maps.</p><div className="connection-requirements"><b>Required</b><span>Configured live source</span><span>Precise location</span><span>Server-side configuration</span></div></div>
         ) : null}
 
         {!problem && providerState === "discovery" && !showtimeResult ? (
-          <div className="connection-state discovery-state"><span>DISCOVERY READY</span><h3>Real showtimes are connected.</h3><p>Run a query to browse Open Cinema coverage. Exact-seat ranking stays disabled until live inventory is connected.</p></div>
+          <div className="connection-state discovery-state"><span>DISCOVERY READY</span><h3>Real showtimes are connected.</h3><p>Run a query to browse the configured source&apos;s coverage. Exact-seat ranking stays disabled until live inventory is connected.</p></div>
         ) : null}
 
         {!problem && providerState === "ready" && !result ? (
@@ -515,7 +515,7 @@ function LiveResult({ result }: { result: SeatQueryResponse }) {
         <aside className="winner-aside">
           <div className="freshness"><span><i />LIVE INVENTORY</span><b>Verified {new Intl.DateTimeFormat(undefined, { hour: "numeric", minute: "2-digit", second: "2-digit" }).format(new Date(winner.verified_at))}</b><small>No order or seat hold was created</small></div>
           <div className="why-block"><span className="aside-kicker">WHY THIS WINS</span><h4>{winner.explanation[0]}</h4><ul>{Object.entries(winner.score_breakdown).map(([key, value]) => <li key={key}><b>{Math.round(value)}</b><span>{humanize(key)}<small>{key === "horizontal_alignment" ? `Target x ${(winner.seat_map?.target.x ?? .5) * 100}%` : "Provider geometry"}</small></span></li>)}</ul></div>
-          {winner.booking_url ? <a className="booking-link" href={winner.booking_url} target="_blank" rel="noreferrer">Open licensed booking page <span>↗</span></a> : <div className="booking-unavailable">No provider booking link was returned. CenterSeat will not invent one.</div>}
+          {winner.booking_url ? <a className="booking-link" href={winner.booking_url} target="_blank" rel="noreferrer">Open provider booking page <span>↗</span></a> : <div className="booking-unavailable">No provider booking link was returned. CenterSeat will not invent one.</div>}
           <p className="booking-note">Query-only release. Availability can change until the theater confirms a purchase.</p>
         </aside>
       </article>

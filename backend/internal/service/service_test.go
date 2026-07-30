@@ -76,6 +76,34 @@ func TestShowtimesReturnsDiscoveryWithoutClaimingSeatInventory(t *testing.T) {
 	}
 }
 
+func TestInventoryPricingAppliesPartyTotalAndHardLimit(t *testing.T) {
+	price, fee := 15.0, 2.5
+	showtime := domain.Showtime{}
+	query := domain.QueryRequest{TicketCount: 2}
+	priced, ok := applyInventoryPricing(showtime, domain.Inventory{
+		TicketPrice: &price, TicketFee: &fee, Currency: "USD",
+	}, query)
+	if !ok || priced.TotalPrice == nil || *priced.TotalPrice != 35 || priced.Currency != "USD" {
+		t.Fatalf("inventory price was not applied to the party total: %#v", priced)
+	}
+	maximum := 34.99
+	query.MaxTotalPrice = &maximum
+	if _, ok := applyInventoryPricing(showtime, domain.Inventory{
+		TicketPrice: &price, TicketFee: &fee, Currency: "USD",
+	}, query); ok {
+		t.Fatal("expected live party total above the maximum to be rejected")
+	}
+}
+
+func TestTimeWindowUsesRequestedTimezone(t *testing.T) {
+	startsAt := time.Date(2026, time.August, 1, 23, 30, 0, 0, time.UTC)
+	if !matchesTime(startsAt, domain.TimeConstraint{
+		Mode: "inside", Start: "19:00", End: "20:00", Timezone: "America/New_York",
+	}) {
+		t.Fatal("expected 23:30 UTC to match the 19:00–20:00 New York window")
+	}
+}
+
 type unsupportedInventoryForTest struct{}
 
 func NewUnsupportedInventoryForTest() unsupportedInventoryForTest {

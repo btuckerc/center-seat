@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -43,9 +44,37 @@ func FromEnvironment() (Discovery, Inventory, error) {
 			return nil, nil, fmt.Errorf("Atom startup probe failed: %w", err)
 		}
 		return provider, provider, nil
+	case "fandango-local":
+		environment := strings.ToLower(strings.TrimSpace(os.Getenv("CENTERSEAT_ENV")))
+		if environment != "local" && environment != "development" {
+			return nil, nil, errors.New("fandango-local is restricted to CENTERSEAT_ENV=local or development and cannot run as a hosted production provider")
+		}
+		provider, err := NewFandangoLocal(FandangoLocalConfig{
+			BaseURL:        os.Getenv("FANDANGO_BASE_URL"),
+			RequestTimeout: 8 * time.Second,
+			MinimumDelay:   time.Duration(environmentInt("FANDANGO_MINIMUM_DELAY_MS", 175)) * time.Millisecond,
+			MaxConcurrency: environmentInt("FANDANGO_MAX_CONCURRENCY", 2),
+		}, nil)
+		if err != nil {
+			return nil, nil, err
+		}
+		probeContext, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := provider.Check(probeContext); err != nil {
+			return nil, nil, fmt.Errorf("Fandango local read-only startup probe failed: %w", err)
+		}
+		return provider, provider, nil
 	case "":
-		return nil, nil, errors.New("CENTERSEAT_PROVIDER_MODE is required; set it to opencinema or atom")
+		return nil, nil, errors.New("CENTERSEAT_PROVIDER_MODE is required; set it to opencinema, atom, or fandango-local")
 	default:
-		return nil, nil, errors.New("unsupported CENTERSEAT_PROVIDER_MODE; supported values are opencinema and atom")
+		return nil, nil, errors.New("unsupported CENTERSEAT_PROVIDER_MODE; supported values are opencinema, atom, and fandango-local")
 	}
+}
+
+func environmentInt(name string, fallback int) int {
+	value, err := strconv.Atoi(strings.TrimSpace(os.Getenv(name)))
+	if err != nil || value <= 0 {
+		return fallback
+	}
+	return value
 }

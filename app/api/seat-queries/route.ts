@@ -5,7 +5,7 @@ const configurationProblem = () =>
       title: "Live inventory is not connected",
       status: 503,
       detail:
-        "The deployed query service has no licensed showtime and seat-inventory endpoint configured. CenterSeat will not substitute demo results.",
+        "The deployed query service has no live showtime and seat-inventory endpoint configured. CenterSeat will not substitute demo results.",
     },
     { status: 503 },
   );
@@ -46,7 +46,7 @@ export async function POST(request: Request) {
         title: "Live inventory is temporarily unavailable",
         status: 503,
         detail:
-          "The licensed query service could not be reached. No cached or fabricated result was returned.",
+          "The configured query service could not be reached. No cached or fabricated result was returned.",
       },
       { status: 503 },
     );

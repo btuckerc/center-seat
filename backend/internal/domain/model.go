@@ -179,11 +179,14 @@ type Seat struct {
 }
 
 type Inventory struct {
-	ShowtimeID string        `json:"showtime_id"`
-	Seats      []Seat        `json:"seats"`
-	Confidence string        `json:"confidence"`
-	ObservedAt time.Time     `json:"observed_at"`
-	FreshFor   time.Duration `json:"-"`
+	ShowtimeID  string        `json:"showtime_id"`
+	Seats       []Seat        `json:"seats"`
+	Confidence  string        `json:"confidence"`
+	ObservedAt  time.Time     `json:"observed_at"`
+	FreshFor    time.Duration `json:"-"`
+	TicketPrice *float64      `json:"-"`
+	TicketFee   *float64      `json:"-"`
+	Currency    string        `json:"-"`
 }
 
 type Recommendation struct {

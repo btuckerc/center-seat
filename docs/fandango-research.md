@@ -1,11 +1,13 @@
-# Fandango read-only research bookmark
+# Fandango local read-only adapter and research bookmark
 
-Status: **disabled and not a production dependency**.
+Status: **implemented behind an explicit local-only mode and not a hosted
+production dependency**.
 
 This document preserves the anonymous, read-only protocol observed by the
 MIT-licensed `atfinke/fandango-mcp` project and provides a safe capture workflow
-for personal research. CenterSeat does not call these routes, replay captured
-requests, enter ticketing, or circumvent access controls.
+for personal research. The opt-in local adapter calls only the three allowlisted
+GET routes documented below. It does not enter ticketing, replay captured
+requests, or circumvent access controls.
 
 ## Observed protocol
 
@@ -40,14 +42,48 @@ GET https://www.fandango.com/napi/theaterCalendar/{theaterId}
 Observed browser requests used ordinary JSON/XHR headers and required no
 account, checkout, order, hold, or payment call.
 
+Movie title resolution:
+
+```http
+GET https://www.fandango.com/napi/home/autocompleteDesktopSearch
+    ?search={movie title}
+```
+
+The response groups results by type. Movie items supply the Fandango movie ID,
+canonical link/slug, name, release date, and poster metadata. This completes a
+free-form-title-to-seat-map read path without a login or checkout session.
+
+## Local implementation
+
+Set `CENTERSEAT_ENV=local` and
+`CENTERSEAT_PROVIDER_MODE=fandango-local`. The adapter:
+
+- rejects startup in `production`;
+- permits only autocomplete, theater-showtime grouping, and seat-map GETs;
+- rejects redirects so an allowlisted read cannot cross into ticketing;
+- never sends cookies, authorization, CSRF, or checkout-session values;
+- spaces request starts and caps concurrency;
+- caches title resolution, showtime discovery, and two-second inventory reads;
+- maps observed `A`, `R`, and `H` states to available, sold, and held,
+  while every unknown state fails closed;
+- normalizes seat centers against the global auditorium seat bounds rather than
+  independently stretching each row; and
+- bypasses the cache for the final winning-seat verification.
+
+The captured click-through sequence confirmed that
+`POST /checkoutapi/reservations/v2` creates reservation state before purchase
+and can return conflicts or server errors. That route and all token, wallet,
+payment, cart, and ticketing-service calls are intentionally absent from the
+adapter.
+
 ## Constraint
 
 Fandango's current Terms of Use prohibit automated extraction, and its
 `robots.txt` disallows `/napi/*`. The existence of anonymous routes or
 open-source client code does not grant permission to operate a hosted scraper.
-This bookmark therefore remains research-only unless Fandango authorizes the
-use or the owner deliberately accepts a local personal-use posture after
-reviewing the current terms.
+The adapter therefore remains opt-in and local-only unless Fandango authorizes
+a hosted use. Enabling it means the owner deliberately accepts a personal-use
+posture after reviewing the current terms.
 
 - Terms: https://www.fandango.com/policies/terms-of-use
 - Robots: https://www.fandango.com/robots.txt
@@ -74,9 +110,9 @@ headers, cookies, authorization values, response values, or full URLs, and it
 does not replay any request. HAR files can still contain sensitive material;
 delete the original after the useful protocol facts have been recorded here.
 
-## Enablement bar
+## Hosted enablement bar
 
-Before any implementation is enabled, verify the route still works through
-ordinary user navigation, document every status value, add contract fixtures,
-enforce GET-only allowlists, cap request volume, refuse ticketing hosts and
-paths, and keep the adapter local-only unless authorization changes.
+Before any hosted implementation is enabled, obtain authorization and re-review
+the routes. The current local adapter already documents observed status values,
+uses contract fixtures, enforces a GET-only path allowlist, caps request volume,
+and refuses ticketing paths.

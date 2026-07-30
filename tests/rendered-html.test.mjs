@@ -28,7 +28,7 @@ test("server-renders the CenterSeat product surface", async () => {
   assert.match(html, /Provider setup required|Checking live providers/);
   assert.match(html, /Results appear only after configured live providers respond/);
   assert.match(html, /Advanced constraints/);
-  assert.match(html, /Open Cinema API key/);
+  assert.match(html, /Configured live source/);
   assert.match(html, /Use precise location · required/);
   assert.doesNotMatch(html, /example\.com|Crown Arc Cinema|Spider-Man: Brand New Day/);
   assert.doesNotMatch(html, /codex-preview|Your site is taking shape|react-loading-skeleton/i);

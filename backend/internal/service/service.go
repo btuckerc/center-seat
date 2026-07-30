@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"sort"
 	"strings"
 	"sync"
@@ -82,6 +83,11 @@ func (s *Service) Query(ctx context.Context, queryID string, q domain.QueryReque
 			inventory, err := s.inventory.GetAvailability(inventoryCtx, st, false)
 			if err != nil {
 				results <- result{err: err}
+				return
+			}
+			st, ok := applyInventoryPricing(st, inventory, q)
+			if !ok {
+				results <- result{err: errors.New("live ticket price exceeded the query constraint or was unavailable")}
 				return
 			}
 			recommendation, ok := ranking.BestBlock(st, inventory, q)
@@ -173,7 +179,7 @@ func (s *Service) Showtimes(ctx context.Context, queryID string, q domain.QueryR
 	filtered := filterShowtimes(showtimes, q, false)
 	now := time.Now().UTC()
 	status := "complete"
-	warnings := []string{"Open Cinema supplies live showtimes and checkout links, but not per-seat availability"}
+	warnings := []string{"Showtime-only queries do not claim per-seat availability; use the seat-query endpoint when live inventory is connected"}
 	if len(filtered) == 0 {
 		status = "no_match"
 		warnings = append(warnings, "No screenings matched every discovery constraint")
@@ -209,7 +215,7 @@ func filterShowtimes(showtimes []domain.Showtime, q domain.QueryRequest, require
 		if q.MaxTotalPrice != nil && st.TotalPrice != nil && *st.TotalPrice > *q.MaxTotalPrice {
 			continue
 		}
-		if q.MaxTotalPrice != nil && st.TotalPrice == nil && !q.AllowUnknownPrice {
+		if q.MaxTotalPrice != nil && st.TotalPrice == nil && !q.AllowUnknownPrice && !requireReservedSeating {
 			continue
 		}
 		if q.AudioDescription && !st.AudioDescription {
@@ -236,6 +242,11 @@ func matchesTime(t time.Time, constraint domain.TimeConstraint) bool {
 	if constraint.Mode == "" || constraint.Mode == "any" {
 		return true
 	}
+	if constraint.Timezone != "" {
+		if location, err := time.LoadLocation(constraint.Timezone); err == nil {
+			t = t.In(location)
+		}
+	}
 	clock := t.Format("15:04")
 	switch constraint.Mode {
 	case "inside":
@@ -249,6 +260,25 @@ func matchesTime(t time.Time, constraint domain.TimeConstraint) bool {
 	default:
 		return false
 	}
+}
+
+func applyInventoryPricing(showtime domain.Showtime, inventory domain.Inventory, query domain.QueryRequest) (domain.Showtime, bool) {
+	if showtime.TotalPrice == nil && inventory.TicketPrice != nil {
+		fee := 0.0
+		if inventory.TicketFee != nil {
+			fee = *inventory.TicketFee
+		}
+		total := math.Round((*inventory.TicketPrice+fee)*float64(query.TicketCount)*100) / 100
+		showtime.TotalPrice = &total
+		showtime.Currency = inventory.Currency
+	}
+	if query.MaxTotalPrice == nil {
+		return showtime, true
+	}
+	if showtime.TotalPrice == nil {
+		return showtime, query.AllowUnknownPrice
+	}
+	return showtime, *showtime.TotalPrice <= *query.MaxTotalPrice
 }
 
 func preliminaryScore(st domain.Showtime, q domain.QueryRequest) float64 {

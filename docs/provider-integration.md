@@ -31,6 +31,23 @@ never calls the lease endpoint. Unknown seat states fail closed as blocked.
 API requires latitude/longitude and limits radius to 80 km. Checkout links are
 used only when Atom supplies a valid HTTPS `atomtickets.com` URL.
 
+## Personal local Fandango path
+
+`CENTERSEAT_PROVIDER_MODE=fandango-local` is an opt-in full-inventory adapter
+that is accepted only with `CENTERSEAT_ENV=local` or `development`. It
+resolves a title through Fandango's anonymous autocomplete response, queries
+showtime groupings for every requested date, filters candidates locally, then
+reads only the bounded set of required seat maps. Exact provider coordinates,
+neighbor IDs, seat types, ticket price/fee hints, and observed availability
+states feed the existing ranker.
+
+The adapter has a hardcoded GET path allowlist, rejects redirects, sends no
+cookie or account state, limits request concurrency, spaces request starts, and
+refreshes the winning map without creating a hold. It contains no checkout,
+token, reservation, cart, wallet, payment, or purchase implementation. Current
+Fandango terms and robots restrictions make this a personal local integration,
+not a hosted production dependency. See `docs/fandango-research.md`.
+
 ## Discovery adapter
 
 An adapter must return normalized movies, venues, showtimes, presentation
@@ -80,5 +97,5 @@ unauthorized scraping a required production dependency. Purchase support should
 be a separate, explicit workflow with new threat modeling, confirmation,
 payment, and cleanup semantics.
 
-The disabled Fandango research bookmark and local HAR-analysis procedure live in
+The opt-in local Fandango adapter notes and local HAR-analysis procedure live in
 `docs/fandango-research.md`. Captures are never replayed by the analyzer.

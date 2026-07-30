@@ -34,3 +34,11 @@ func TestOpenCinemaModeRequiresAPIKey(t *testing.T) {
 		t.Fatal("expected missing Open Cinema key to fail before startup")
 	}
 }
+
+func TestFandangoLocalModeCannotRunAsProductionProvider(t *testing.T) {
+	t.Setenv("CENTERSEAT_PROVIDER_MODE", "fandango-local")
+	t.Setenv("CENTERSEAT_ENV", "production")
+	if _, _, err := FromEnvironment(); err == nil {
+		t.Fatal("expected the personal Fandango adapter to be rejected in production")
+	}
+}
