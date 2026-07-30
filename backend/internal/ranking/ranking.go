@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math"
 	"sort"
+	"strings"
 
 	"centerseat/backend/internal/domain"
 )
@@ -49,6 +50,10 @@ func eligible(seat domain.Seat, q domain.QueryRequest) bool {
 	if seat.Status != "available" {
 		return false
 	}
+	return eligibleType(seat, q)
+}
+
+func eligibleType(seat domain.Seat, q domain.QueryRequest) bool {
 	if seat.Type == "wheelchair" {
 		return q.WheelchairSpaces > 0
 	}
@@ -131,14 +136,92 @@ func BestBlock(showtime domain.Showtime, inventory domain.Inventory, q domain.Qu
 		fmt.Sprintf("Row %s is %.0f%% of the way from the screen", best[0].Row, best[0].Y*100),
 		"Live availability was refreshed before this recommendation was returned",
 	}
+	seatOptions, recommendedZone := centerSeatOptions(inventory.Seats, q, target, best, excludedRows)
+	if q.TicketCount == 1 && q.SeatProfile == "dead_center" && len(recommendedZone) > 1 {
+		unavailable := len(recommendedZone) - len(seatOptions)
+		if len(seatOptions) == 0 {
+			seatOptions = append([]domain.Seat(nil), best...)
+			explanation[0] = fmt.Sprintf("%s is the closest available seat; all %d geometric center-zone positions are unavailable", joinSeatLabels(seatOptions), len(recommendedZone))
+		} else if len(seatOptions) == 1 {
+			explanation[0] = fmt.Sprintf("%s is the best available choice in the %d-seat geometric center zone", joinSeatLabels(seatOptions), len(recommendedZone))
+		} else {
+			explanation[0] = fmt.Sprintf("%s are the best available choices in the %d-seat geometric center zone", joinSeatLabels(seatOptions), len(recommendedZone))
+		}
+		if unavailable > 0 {
+			explanation = append(explanation[:1], append([]string{fmt.Sprintf("%d ideal-zone %s currently unavailable", unavailable, pluralizeSeat(unavailable))}, explanation[1:]...)...)
+		}
+	}
 	return domain.Recommendation{
-		Showtime: showtime, Seats: best, Score: round2(score), Confidence: inventory.Confidence,
+		Showtime: showtime, Seats: best, SeatOptions: seatOptions, Score: round2(score), Confidence: inventory.Confidence,
 		Explanation: explanation, ScoreBreakdown: bestParts, VerifiedAt: inventory.ObservedAt, BookingURL: showtime.BookingURL,
 		SeatMap: &domain.SeatMap{
-			Seats: inventory.Seats, Target: domain.GeometryPoint{X: target.X, Y: target.Y},
+			Seats: inventory.Seats, Target: domain.GeometryPoint{X: target.X, Y: target.Y}, RecommendedZone: recommendedZone,
 			Confidence: inventory.Confidence, ObservedAt: inventory.ObservedAt,
 		},
 	}, true
+}
+
+func centerSeatOptions(seats []domain.Seat, q domain.QueryRequest, target Targets, best []domain.Seat, excludedRows map[string]bool) ([]domain.Seat, []string) {
+	if len(best) == 0 {
+		return nil, nil
+	}
+	if q.TicketCount != 1 || q.SeatProfile != "dead_center" {
+		ids := make([]string, 0, len(best))
+		for _, seat := range best {
+			ids = append(ids, seat.ID)
+		}
+		return append([]domain.Seat(nil), best...), ids
+	}
+	candidates := make([]domain.Seat, 0)
+	for _, seat := range seats {
+		if seat.Row == best[0].Row && !excludedRows[seat.Row] && eligibleType(seat, q) {
+			candidates = append(candidates, seat)
+		}
+	}
+	sort.SliceStable(candidates, func(i, j int) bool {
+		left := math.Abs(candidates[i].X - target.X)
+		right := math.Abs(candidates[j].X - target.X)
+		if left == right {
+			return candidates[i].Index < candidates[j].Index
+		}
+		return left < right
+	})
+	if len(candidates) > 4 {
+		candidates = candidates[:4]
+	}
+	zone := make([]string, 0, len(candidates))
+	options := make([]domain.Seat, 0, len(candidates))
+	for _, seat := range candidates {
+		zone = append(zone, seat.ID)
+		if seat.Status == "available" {
+			options = append(options, seat)
+		}
+	}
+	return options, zone
+}
+
+func joinSeatLabels(seats []domain.Seat) string {
+	if len(seats) == 0 {
+		return "No seats"
+	}
+	labels := make([]string, 0, len(seats))
+	for _, seat := range seats {
+		labels = append(labels, seat.Label)
+	}
+	if len(labels) == 1 {
+		return labels[0]
+	}
+	if len(labels) == 2 {
+		return labels[0] + " and " + labels[1]
+	}
+	return fmt.Sprintf("%s, and %s", strings.Join(labels[:len(labels)-1], ", "), labels[len(labels)-1])
+}
+
+func pluralizeSeat(count int) string {
+	if count == 1 {
+		return "seat is"
+	}
+	return "seats are"
 }
 
 func meetsMinimumConfidence(actual, minimum string) bool {

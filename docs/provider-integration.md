@@ -41,6 +41,13 @@ reads only the bounded set of required seat maps. Exact provider coordinates,
 neighbor IDs, seat types, ticket price/fee hints, and observed availability
 states feed the existing ranker.
 
+The adapter also exposes normalized autocomplete suggestions so the client can
+send a selected canonical movie ID and avoid ambiguous title resolution. Free
+text remains valid. A five-digit US ZIP is accepted as a coarse location signal,
+so this path does not require browser geolocation; coordinates can still be used
+when the user explicitly chooses current location. Other providers continue to
+declare whether they require coordinates.
+
 The adapter has a hardcoded GET path allowlist, rejects redirects, sends no
 cookie or account state, limits request concurrency, spaces request starts, and
 refreshes the winning map without creating a hold. It contains no checkout,

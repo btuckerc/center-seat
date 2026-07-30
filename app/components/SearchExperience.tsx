@@ -1,9 +1,10 @@
 "use client";
 
-import { FormEvent, useEffect, useState } from "react";
+import { FormEvent, useEffect, useId, useState } from "react";
 import {
   createDefaultQuery,
   type QueryState,
+  type MovieSuggestion,
   type Recommendation,
   type SeatProfile,
   type SeatQueryResponse,
@@ -66,6 +67,8 @@ const screeningLabels = (showtime: Showtime) => ({
 const humanize = (value: string) =>
   value.replaceAll("_", " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
 
+const postalCodePattern = /^\s*\d{5}(?:-\d{4})?\s*$/;
+
 export function SearchExperience() {
   const [draft, setDraft] = useState<QueryState>(() => createDefaultQuery());
   const [applied, setApplied] = useState<QueryState | null>(null);
@@ -76,19 +79,25 @@ export function SearchExperience() {
   const [searching, setSearching] = useState(false);
   const [locating, setLocating] = useState(false);
   const [locationProblem, setLocationProblem] = useState("");
+  const [postalLocationSupported, setPostalLocationSupported] = useState(false);
+  const [movieSuggestions, setMovieSuggestions] = useState<MovieSuggestion[]>([]);
+  const [suggestionsOpen, setSuggestionsOpen] = useState(false);
+  const [activeSuggestion, setActiveSuggestion] = useState(-1);
   const [copied, setCopied] = useState(false);
+  const suggestionsID = useId();
 
   useEffect(() => {
     let active = true;
     fetch("/api/providers", { cache: "no-store" })
       .then(async (response) => {
         const payload = (await response.json()) as {
-          providers?: Array<{ configured: boolean; status: string; kind: string }>;
+          providers?: Array<{ configured: boolean; status: string; kind: string; location_mode?: string }>;
         };
         if (!active) return;
         const statuses = payload.providers ?? [];
         const discoveryReady = statuses.some((provider) => provider.kind === "discovery" && provider.configured && provider.status === "healthy");
         const inventoryReady = statuses.some((provider) => provider.kind === "inventory" && provider.configured && provider.status === "healthy");
+        setPostalLocationSupported(statuses.some((provider) => provider.kind === "discovery" && provider.configured && provider.status === "healthy" && provider.location_mode === "postal_or_coordinates"));
         if (response.ok && discoveryReady && inventoryReady) {
           setProviderState("ready");
         } else if (response.ok && discoveryReady) {
@@ -100,6 +109,29 @@ export function SearchExperience() {
       .catch(() => active && setProviderState("unavailable"));
     return () => { active = false; };
   }, []);
+
+  useEffect(() => {
+    const query = draft.movie.trim();
+    if (providerState !== "ready" || draft.movieId || query.length < 2) {
+      return;
+    }
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => {
+      fetch(`/api/movie-suggestions?q=${encodeURIComponent(query)}`, { signal: controller.signal, cache: "no-store" })
+        .then(async (response) => response.ok ? response.json() as Promise<{ suggestions?: MovieSuggestion[] }> : { suggestions: [] })
+        .then((payload) => {
+          const suggestions = payload.suggestions ?? [];
+          setMovieSuggestions(suggestions);
+          setSuggestionsOpen(suggestions.length > 0);
+          setActiveSuggestion(-1);
+        })
+        .catch(() => undefined);
+    }, 220);
+    return () => {
+      window.clearTimeout(timer);
+      controller.abort();
+    };
+  }, [draft.movie, draft.movieId, providerState]);
 
   const update = <K extends keyof QueryState>(key: K, value: QueryState[K]) => {
     setDraft((current) => ({ ...current, [key]: value }));
@@ -133,12 +165,30 @@ export function SearchExperience() {
         setLocating(false);
       },
       () => {
-        setLocationProblem("Location permission was not granted. Live nearby-showtime sources require coordinates.");
+        setLocationProblem(postalLocationSupported ? "Location permission was not granted. You can enter a 5-digit ZIP instead." : "Location permission was not granted. This provider requires coordinates.");
         setLocating(false);
       },
-      { enableHighAccuracy: true, timeout: 10_000, maximumAge: 300_000 },
+      { enableHighAccuracy: false, timeout: 10_000, maximumAge: 3_600_000 },
     );
   };
+
+  const chooseMovie = (suggestion: MovieSuggestion) => {
+    setDraft((current) => ({ ...current, movie: suggestion.title, movieId: suggestion.id }));
+    setMovieSuggestions([]);
+    setSuggestionsOpen(false);
+    setActiveSuggestion(-1);
+  };
+
+  const hasCoordinates = draft.latitude !== undefined && draft.longitude !== undefined;
+  const hasPostalLocation = postalLocationSupported && postalCodePattern.test(draft.location);
+  const locationReady = hasCoordinates || hasPostalLocation;
+  const locationHint = hasCoordinates
+    ? "Current-area coordinates set. Edit this field to switch back to a ZIP."
+    : hasPostalLocation
+      ? "ZIP is enough for this provider — no browser location permission needed."
+      : postalLocationSupported
+        ? "Enter a 5-digit ZIP, or use current location for a city or neighborhood search."
+        : "This provider needs current-location coordinates to search nearby.";
 
   const search = async (event: FormEvent) => {
     event.preventDefault();
@@ -153,6 +203,7 @@ export function SearchExperience() {
     setShowtimeResult(null);
     const payload = {
       movie_query: draft.movie.trim(),
+      ...(draft.movieId ? { movie_id: draft.movieId } : {}),
       location: {
         query: draft.location.trim(),
         ...(draft.latitude !== undefined ? { latitude: draft.latitude } : {}),
@@ -232,12 +283,12 @@ export function SearchExperience() {
   const searchText = searching
     ? "Querying live providers…"
     : providerState === "ready"
-      ? draft.latitude === undefined || draft.longitude === undefined
-        ? "Use precise location to continue"
+      ? !locationReady
+        ? postalLocationSupported ? "Enter a ZIP or use current location" : "Use current location to continue"
         : "Find live seats"
       : providerState === "discovery"
-        ? draft.latitude === undefined || draft.longitude === undefined
-          ? "Use precise location to continue"
+        ? !locationReady
+          ? "Use current location to continue"
           : "Find live showtimes"
         : "Connect live providers to search";
 
@@ -259,7 +310,7 @@ export function SearchExperience() {
           <h1>Find the one<br />worth booking.</h1>
           <p>
             Query real showtimes across a date range. When live seat inventory is available,
-            get one exact recommendation based on the theater&apos;s real geometry.
+            get a verified best block plus the strongest equivalent seat choices around it.
           </p>
           <div className="hero-proof">
             <div><strong>LIVE</strong><span>configured sources only</span></div>
@@ -289,9 +340,59 @@ export function SearchExperience() {
           ) : null}
 
           <div className="field-stack">
-            <label className="field wide-field">
+            <label className="field wide-field movie-field">
               <FieldLabel number="1">Movie</FieldLabel>
-              <input value={draft.movie} onChange={(event) => update("movie", event.target.value)} placeholder="Movie title" required />
+              <input
+                aria-activedescendant={activeSuggestion >= 0 ? `${suggestionsID}-${activeSuggestion}` : undefined}
+                aria-autocomplete="list"
+                aria-controls={suggestionsID}
+                aria-expanded={suggestionsOpen}
+                autoComplete="off"
+                onBlur={() => window.setTimeout(() => setSuggestionsOpen(false), 120)}
+                onChange={(event) => {
+                  const value = event.target.value;
+                  setDraft((current) => ({ ...current, movie: value, movieId: undefined }));
+                  if (value.trim().length < 2) {
+                    setMovieSuggestions([]);
+                    setSuggestionsOpen(false);
+                    setActiveSuggestion(-1);
+                  } else {
+                    setSuggestionsOpen(true);
+                  }
+                }}
+                onFocus={() => setSuggestionsOpen(movieSuggestions.length > 0)}
+                onKeyDown={(event) => {
+                  if (event.key === "ArrowDown" && movieSuggestions.length) {
+                    event.preventDefault();
+                    setSuggestionsOpen(true);
+                    setActiveSuggestion((current) => Math.min(current + 1, movieSuggestions.length - 1));
+                  } else if (event.key === "ArrowUp" && movieSuggestions.length) {
+                    event.preventDefault();
+                    setActiveSuggestion((current) => Math.max(current - 1, 0));
+                  } else if (event.key === "Enter" && suggestionsOpen && activeSuggestion >= 0) {
+                    event.preventDefault();
+                    chooseMovie(movieSuggestions[activeSuggestion]);
+                  } else if (event.key === "Escape") {
+                    setSuggestionsOpen(false);
+                  }
+                }}
+                placeholder="Start typing a movie title"
+                role="combobox"
+                value={draft.movie}
+                required
+              />
+              {draft.movieId ? <span className="canonical-match">Matched to the provider&apos;s canonical title ✓</span> : null}
+              {suggestionsOpen ? (
+                <ul className="movie-suggestions" id={suggestionsID} role="listbox">
+                  {movieSuggestions.map((suggestion, index) => (
+                    <li aria-selected={index === activeSuggestion} id={`${suggestionsID}-${index}`} key={suggestion.id} role="option">
+                      <button onMouseDown={(event) => event.preventDefault()} onClick={() => chooseMovie(suggestion)} type="button">
+                        <span>{suggestion.title}</span><small>{suggestion.year || "Release date pending"}</small>
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              ) : null}
             </label>
 
             <div className="field-row location-row">
@@ -301,14 +402,15 @@ export function SearchExperience() {
                   value={draft.location}
                   onChange={(event) => {
                     setDraft((current) => ({ ...current, location: event.target.value, latitude: undefined, longitude: undefined }));
-                    setLocationProblem("Use precise location after changing this label.");
+                    setLocationProblem("");
                   }}
-                  placeholder="Location label"
+                  placeholder={postalLocationSupported ? "ZIP code (no permission needed)" : "City or location label"}
                   required
                 />
+                <span className="field-hint">{locationHint}</span>
               </label>
               <button className="location-button" onClick={useCurrentLocation} type="button">
-                {locating ? "Locating…" : draft.latitude !== undefined ? "Precise location set ✓" : "Use precise location · required"}
+                {locating ? "Locating…" : hasCoordinates ? "Current location set ✓" : postalLocationSupported ? "Use current location · optional" : "Use current location · required"}
               </button>
               {locationProblem ? <span className="location-problem" role="alert">{locationProblem}</span> : null}
             </div>
@@ -399,7 +501,7 @@ export function SearchExperience() {
             </div>
           </details>
 
-          <button className="search-button" disabled={searching || (providerState !== "ready" && providerState !== "discovery") || !draft.movie.trim() || !draft.location.trim() || draft.latitude === undefined || draft.longitude === undefined || draft.formats.length === 0} type="submit">
+          <button className="search-button" disabled={searching || (providerState !== "ready" && providerState !== "discovery") || !draft.movie.trim() || !draft.location.trim() || !locationReady || draft.formats.length === 0} type="submit">
             <span>{searchText}</span><b>{searching ? <i className="button-spinner" /> : "→"}</b>
           </button>
           <p className="query-note">No demo fallback. No holds. Discovery-only results are labeled and never presented as seat availability.</p>
@@ -421,7 +523,7 @@ export function SearchExperience() {
         ) : null}
 
         {!problem && providerState !== "ready" && providerState !== "discovery" ? (
-          <div className="connection-state"><span>PRODUCTION SAFETY</span><h3>Live discovery is not connected yet.</h3><p>Synthetic results remain disabled. Configure Open Cinema for discovery, or run the personal Fandango provider locally for exact seat maps.</p><div className="connection-requirements"><b>Required</b><span>Configured live source</span><span>Precise location</span><span>Server-side configuration</span></div></div>
+          <div className="connection-state"><span>PRODUCTION SAFETY</span><h3>Live discovery is not connected yet.</h3><p>Synthetic results remain disabled. Configure Open Cinema for discovery, or run the personal Fandango provider locally for exact seat maps.</p><div className="connection-requirements"><b>Required</b><span>Configured live source</span><span>ZIP or provider location</span><span>Server-side configuration</span></div></div>
         ) : null}
 
         {!problem && providerState === "discovery" && !showtimeResult ? (
@@ -429,10 +531,10 @@ export function SearchExperience() {
         ) : null}
 
         {!problem && providerState === "ready" && !result ? (
-          <div className="connection-state ready-state"><span>READY</span><h3>Licensed providers are connected.</h3><p>Run a query to compare live inventory across the complete date range.</p></div>
+          <div className="connection-state ready-state"><span>READY</span><h3>Live providers are connected.</h3><p>Run a query to compare live inventory across the complete date range.</p></div>
         ) : null}
 
-        {result?.winner ? <LiveResult result={result} /> : null}
+        {result?.winner ? <LiveResult key={result.query_id} result={result} /> : null}
 
         {showtimeResult ? <ShowtimeResults result={showtimeResult} /> : null}
 
@@ -444,7 +546,7 @@ export function SearchExperience() {
       <section className="method-section" id="method">
         <div className="method-intro"><span className="eyebrow"><span>03</span> Built for repeatability</span><h2>Fast because it asks<br />expensive questions last.</h2><p>Discovery is cached broadly. Live inventory is requested only for screenings that survive the hard constraints. The exact winner is refreshed one final time.</p></div>
         <ol className="method-steps">
-          <li><span>01</span><div><b>Discover every date</b><p>Licensed showtimes are normalized across the full requested date range.</p></div><small>1–31 days</small></li>
+          <li><span>01</span><div><b>Discover every date</b><p>Configured live showtimes are normalized across the full requested date range.</p></div><small>1–31 days</small></li>
           <li><span>02</span><div><b>Prune cheaply</b><p>Time, distance, price, format, accessibility, and amenity constraints reduce fan-out.</p></div><small>Local operation</small></li>
           <li><span>03</span><div><b>Check in parallel</b><p>Only top candidates receive bounded live-inventory requests.</p></div><small>5–12 maps</small></li>
           <li><span>04</span><div><b>Rank actual geometry</b><p>The same coordinate model drives both scoring and the map you see.</p></div><small>One authority</small></li>
@@ -490,9 +592,44 @@ function ShowtimeResults({ result }: { result: ShowtimeQueryResponse }) {
 
 function LiveResult({ result }: { result: SeatQueryResponse }) {
   const winner = result.winner as Recommendation;
-  const labels = winner.seats.map((seat) => seat.label);
-  const showtime = showtimeLabels(winner);
-  const availableCount = winner.seat_map?.seats.filter((seat) => seat.status === "available").length ?? 0;
+  const [active, setActive] = useState<Recommendation>(winner);
+  const [loadingRank, setLoadingRank] = useState<number | null>(null);
+  const [mapProblem, setMapProblem] = useState("");
+
+  const openRecommendation = async (recommendation: Recommendation) => {
+    if (recommendation.rank === active.rank && recommendation.seat_map) return;
+    setMapProblem("");
+    if (recommendation.seat_map) {
+      setActive(recommendation);
+      return;
+    }
+    setLoadingRank(recommendation.rank);
+    try {
+      const response = await fetch(`/api/seat-recommendations?query_id=${encodeURIComponent(result.query_id)}&rank=${recommendation.rank}`, { cache: "no-store" });
+      const body = await response.json();
+      if (!response.ok) throw new Error(body.detail ?? "The selected map could not be refreshed.");
+      setActive(body as Recommendation);
+      requestAnimationFrame(() => document.getElementById("active-seat-map")?.scrollIntoView({ behavior: "smooth", block: "center" }));
+    } catch (error) {
+      setMapProblem(error instanceof Error ? error.message : "The selected map could not be refreshed.");
+    } finally {
+      setLoadingRank(null);
+    }
+  };
+
+  const options = active.seat_options?.length ? active.seat_options : active.seats;
+  const optionLabels = options.map((seat) => seat.label);
+  const zoneSize = active.seat_map?.recommended_zone?.length ?? options.length;
+  const zoneIDs = new Set(active.seat_map?.recommended_zone ?? options.map((seat) => seat.id));
+  const availableOptionsInZone = options.filter((seat) => zoneIDs.has(seat.id)).length;
+  const unavailableInZone = Math.max(0, zoneSize - availableOptionsInZone);
+  const zoneSummary = zoneSize > active.seats.length
+    ? availableOptionsInZone > 0
+      ? `${availableOptionsInZone} best available ${availableOptionsInZone === 1 ? "choice" : "choices"} in a ${zoneSize}-seat center zone${unavailableInZone ? ` · ${unavailableInZone} unavailable` : ""}`
+      : `All ${zoneSize} center-zone positions unavailable · closest available seat shown`
+    : "";
+  const showtime = showtimeLabels(active);
+  const availableCount = active.seat_map?.seats.filter((seat) => seat.status === "available").length ?? 0;
   return (
     <>
       <div className="coverage-strip" aria-label="Query coverage">
@@ -501,26 +638,27 @@ function LiveResult({ result }: { result: SeatQueryResponse }) {
         <span><b>{result.coverage.inventories_checked}</b> live maps checked</span><i>→</i>
         <span className="verified"><b>1</b> winner reverified</span><small>{result.coverage.elapsed_ms} ms</small>
       </div>
-      <article className="winner-card">
+      <article className="winner-card" id="active-seat-map">
         <div className="winner-main">
-          <div className="winner-head"><div><span className="winner-label">BEST AVAILABLE · LIVE</span><h3>{labels.join(" + ")}</h3><p>{winner.showtime.venue_name}{winner.showtime.auditorium_name ? ` · ${winner.showtime.auditorium_name}` : ""}</p></div><div className="score-ring" aria-label={`${winner.score} percent match`}><strong>{winner.score}</strong><small>/100</small><span>MATCH</span></div></div>
+          <div className="winner-head"><div><span className="winner-label">{active.rank === 1 ? "BEST AVAILABLE" : `ALTERNATIVE 0${active.rank}`} · LIVE</span><h3>{optionLabels.join(" · ")}</h3><p>{active.showtime.venue_name}{active.showtime.auditorium_name ? ` · ${active.showtime.auditorium_name}` : ""}</p>{zoneSummary ? <small className="option-summary">{zoneSummary}</small> : null}</div><div className="score-ring" aria-label={`${active.score} percent match`}><strong>{active.score}</strong><small>/100</small><span>MATCH</span></div></div>
           <div className="showtime-facts">
             <div><span>SHOWTIME</span><b>{showtime.time}</b><small>{showtime.date}</small></div>
-            <div><span>FORMAT</span><b>{humanize(winner.showtime.format)}</b><small>{winner.showtime.amenities?.map(humanize).join(" · ") || "Provider supplied"}</small></div>
-            <div><span>DISTANCE</span><b>{winner.showtime.distance_miles.toFixed(1)} mi</b><small>From query location</small></div>
+            <div><span>FORMAT</span><b>{humanize(active.showtime.format)}</b><small>{active.showtime.amenities?.map(humanize).join(" · ") || "Provider supplied"}</small></div>
+            <div><span>DISTANCE</span><b>{active.showtime.distance_miles.toFixed(1)} mi</b><small>From query location</small></div>
             <div><span>LIVE MAP</span><b>{availableCount} open</b><small>Verified {new Intl.RelativeTimeFormat(undefined, { numeric: "auto" }).format(0, "second")}</small></div>
           </div>
-          <SeatMap recommendation={winner} />
+          <SeatMap recommendation={active} />
         </div>
         <aside className="winner-aside">
-          <div className="freshness"><span><i />LIVE INVENTORY</span><b>Verified {new Intl.DateTimeFormat(undefined, { hour: "numeric", minute: "2-digit", second: "2-digit" }).format(new Date(winner.verified_at))}</b><small>No order or seat hold was created</small></div>
-          <div className="why-block"><span className="aside-kicker">WHY THIS WINS</span><h4>{winner.explanation[0]}</h4><ul>{Object.entries(winner.score_breakdown).map(([key, value]) => <li key={key}><b>{Math.round(value)}</b><span>{humanize(key)}<small>{key === "horizontal_alignment" ? `Target x ${(winner.seat_map?.target.x ?? .5) * 100}%` : "Provider geometry"}</small></span></li>)}</ul></div>
-          {winner.booking_url ? <a className="booking-link" href={winner.booking_url} target="_blank" rel="noreferrer">Open provider booking page <span>↗</span></a> : <div className="booking-unavailable">No provider booking link was returned. CenterSeat will not invent one.</div>}
+          <div className="freshness"><span><i />LIVE INVENTORY</span><b>Verified {new Intl.DateTimeFormat(undefined, { hour: "numeric", minute: "2-digit", second: "2-digit" }).format(new Date(active.verified_at))}</b><small>No order or seat hold was created</small></div>
+          <div className="why-block"><span className="aside-kicker">WHY THIS RANKS</span><h4>{active.explanation[0]}</h4><ul>{Object.entries(active.score_breakdown).map(([key, value]) => <li key={key}><b>{Math.round(value)}</b><span>{humanize(key)}<small>{key === "horizontal_alignment" ? `Target x ${(active.seat_map?.target.x ?? .5) * 100}%` : "Provider geometry"}</small></span></li>)}</ul></div>
+          {active.booking_url ? <a className="booking-link" href={active.booking_url} target="_blank" rel="noreferrer">Open provider booking page <span>↗</span></a> : <div className="booking-unavailable">No provider booking link was returned. CenterSeat will not invent one.</div>}
           <p className="booking-note">Query-only release. Availability can change until the theater confirms a purchase.</p>
         </aside>
       </article>
+      {mapProblem ? <div className="result-warnings" role="alert"><span>{mapProblem}</span></div> : null}
       {result.warnings?.length ? <div className="result-warnings">{result.warnings.map((warning) => <span key={warning}>{warning}</span>)}</div> : null}
-      {result.alternatives.length ? <><div className="alternatives-heading"><div><span className="aside-kicker">LIVE-CHECKED ALTERNATIVES</span><h3>Trade time, distance, or format.</h3></div><span>No fabricated availability</span></div><div className="alternative-grid">{result.alternatives.map((recommendation) => { const labels = recommendation.seats.map((seat) => seat.label); const time = showtimeLabels(recommendation); return <article className="alternative-card" key={recommendation.showtime.id}><div className="alt-top"><span>0{recommendation.rank}</span><b>{recommendation.score}<small>/100</small></b></div><h4>{labels.join(" + ")}</h4><p>{recommendation.showtime.venue_name}</p><div className="alt-facts"><span>{time.time}</span><span>{humanize(recommendation.showtime.format)}</span><span>{recommendation.showtime.distance_miles.toFixed(1)} mi</span></div><div className="alt-bottom"><span>{time.date}</span><span>Verified live</span></div></article>; })}</div></> : null}
+      {result.alternatives.length ? <><div className="alternatives-heading"><div><span className="aside-kicker">EXPLORE LIVE-CHECKED ALTERNATIVES</span><h3>Open any option to inspect its map.</h3></div>{active.rank === 1 ? <span>No fabricated availability</span> : <button className="back-to-winner" onClick={() => setActive(winner)} type="button">Back to best option ↑</button>}</div><div className="alternative-grid">{result.alternatives.map((recommendation) => { const labels = (recommendation.seat_options?.length ? recommendation.seat_options : recommendation.seats).map((seat) => seat.label); const time = showtimeLabels(recommendation); const isLoading = loadingRank === recommendation.rank; return <button aria-pressed={active.rank === recommendation.rank} className={`alternative-card${active.rank === recommendation.rank ? " selected" : ""}`} disabled={loadingRank !== null} key={recommendation.showtime.id} onClick={() => openRecommendation(recommendation)} type="button"><div className="alt-top"><span>0{recommendation.rank}</span><b>{recommendation.score}<small>/100</small></b></div><h4>{labels.join(" · ")}</h4><p>{recommendation.showtime.venue_name}</p><div className="alt-facts"><span>{time.time}</span><span>{humanize(recommendation.showtime.format)}</span><span>{recommendation.showtime.distance_miles.toFixed(1)} mi</span></div><div className="alt-bottom"><span>{time.date}</span><span>{isLoading ? "Refreshing map…" : active.rank === recommendation.rank ? "Map open ↑" : "View live map →"}</span></div></button>; })}</div></> : null}
     </>
   );
 }

@@ -29,7 +29,7 @@ test("server-renders the CenterSeat product surface", async () => {
   assert.match(html, /Results appear only after configured live providers respond/);
   assert.match(html, /Advanced constraints/);
   assert.match(html, /Configured live source/);
-  assert.match(html, /Use precise location · required/);
+  assert.match(html, /Use current location · required/);
   assert.doesNotMatch(html, /example\.com|Crown Arc Cinema|Spider-Man: Brand New Day/);
   assert.doesNotMatch(html, /codex-preview|Your site is taking shape|react-loading-skeleton/i);
 });
@@ -46,11 +46,13 @@ test("includes accessible controls and the live-query method", async () => {
 });
 
 test("uses provider geometry and separates discovery from seat inventory", async () => {
-  const [seatMap, search, seatApiRoute, showtimeApiRoute] = await Promise.all([
+  const [seatMap, search, seatApiRoute, showtimeApiRoute, suggestionsRoute, recommendationRoute] = await Promise.all([
     readFile(new URL("../app/components/SeatMap.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/components/SearchExperience.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/api/seat-queries/route.ts", import.meta.url), "utf8"),
     readFile(new URL("../app/api/showtime-queries/route.ts", import.meta.url), "utf8"),
+    readFile(new URL("../app/api/movie-suggestions/route.ts", import.meta.url), "utf8"),
+    readFile(new URL("../app/api/seat-recommendations/route.ts", import.meta.url), "utf8"),
   ]);
 
   assert.match(seatMap, /recommendation\.seat_map/);
@@ -58,11 +60,19 @@ test("uses provider geometry and separates discovery from seat inventory", async
   assert.match(seatMap, /status-held/);
   assert.match(seatMap, /geometry-centerline/);
   assert.match(search, /dates: \{ start: draft\.dateStart, end: draft\.dateEnd \}/);
-  assert.match(search, /draft\.latitude === undefined/);
+  assert.match(search, /hasPostalLocation/);
+  assert.match(search, /movie_id/);
+  assert.match(search, /movie-suggestions/);
+  assert.match(search, /seat-recommendations/);
+  assert.match(search, /center-zone positions unavailable/);
+  assert.match(seatMap, /recommended_zone/);
+  assert.match(seatMap, /seat_options/);
   assert.match(search, /\/api\/seat-queries/);
   assert.match(search, /\/api\/showtime-queries/);
   assert.match(search, /Discovery-only/);
   assert.match(seatApiRoute, /CENTERSEAT_API_URL/);
   assert.match(showtimeApiRoute, /queryOpenCinema/);
+  assert.match(suggestionsRoute, /movie-suggestions/);
+  assert.match(recommendationRoute, /recommendations/);
   assert.doesNotMatch(search, /runDemoQuery|example\.com|Crown Arc Cinema/);
 });

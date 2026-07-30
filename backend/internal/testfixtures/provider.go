@@ -13,6 +13,13 @@ type Provider struct{}
 
 func (Provider) Name() string { return "test-fixture" }
 
+func (Provider) SuggestMovies(ctx context.Context, query string, limit int) ([]domain.MovieSuggestion, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return []domain.MovieSuggestion{{ID: "movie-1", Title: query + " Canonical", Year: "2026"}}, nil
+}
+
 func (Provider) ProviderStatus(kind string) domain.ProviderStatus {
 	now := time.Now().UTC()
 	return domain.ProviderStatus{

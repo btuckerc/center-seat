@@ -42,6 +42,42 @@ func (s *Service) ProviderStatuses() []domain.ProviderStatus {
 	}
 }
 
+func (s *Service) MovieSuggestions(ctx context.Context, query string, limit int) ([]domain.MovieSuggestion, error) {
+	suggester, ok := s.discovery.(providers.MovieSuggester)
+	if !ok {
+		return []domain.MovieSuggestion{}, nil
+	}
+	query = strings.TrimSpace(query)
+	if len(query) < 2 || len(query) > 160 {
+		return nil, errors.New("movie suggestion query must be between 2 and 160 characters")
+	}
+	if limit < 1 || limit > 10 {
+		limit = 6
+	}
+	requestCtx, cancel := context.WithTimeout(ctx, 4*time.Second)
+	defer cancel()
+	return suggester.SuggestMovies(requestCtx, query, limit)
+}
+
+func (s *Service) RefreshRecommendation(ctx context.Context, source domain.Recommendation, q domain.QueryRequest) (domain.Recommendation, error) {
+	q.SetDefaults()
+	inventory, err := s.inventory.GetAvailability(ctx, source.Showtime, true)
+	if err != nil {
+		return domain.Recommendation{}, err
+	}
+	showtime, ok := applyInventoryPricing(source.Showtime, inventory, q)
+	if !ok {
+		return domain.Recommendation{}, errors.New("live ticket price exceeded the query constraint or was unavailable")
+	}
+	recommendation, ok := ranking.BestBlock(showtime, inventory, q)
+	if !ok {
+		return domain.Recommendation{}, errors.New("the selected screening no longer has an eligible seat block")
+	}
+	recommendation.Rank = source.Rank
+	recommendation.Score = combinedScore(recommendation.Score, showtime, q)
+	return recommendation, nil
+}
+
 func (s *Service) Query(ctx context.Context, queryID string, q domain.QueryRequest) (domain.QueryResponse, error) {
 	started := time.Now()
 	q.SetDefaults()

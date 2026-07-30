@@ -63,6 +63,7 @@ export async function openCinemaProviderStatuses(): Promise<ProviderStatus[]> {
         configured: true,
         message: "Self-service showtime API connected",
         coverage: "Independent, repertory, and arthouse cinemas",
+        location_mode: "coordinates",
         last_success_at: new Date().toISOString(),
       },
       {
@@ -81,6 +82,7 @@ export async function openCinemaProviderStatuses(): Promise<ProviderStatus[]> {
         status: "degraded",
         configured: true,
         message: "Open Cinema health check failed",
+        location_mode: "coordinates",
       },
       {
         name: "seat-inventory-not-connected",

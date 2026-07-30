@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -121,12 +122,13 @@ func (f *FandangoLocal) ProviderStatus(kind string) domain.ProviderStatus {
 	last := f.lastSuccess
 	f.statusMu.RUnlock()
 	status := domain.ProviderStatus{
-		Name:       fandangoProviderName,
-		Kind:       kind,
-		Status:     "healthy",
-		Configured: true,
-		Coverage:   "Personal local runtime; Fandango browser showtimes and read-only seat maps",
-		Message:    "GET-only local adapter configured; reservation, token, wallet, payment, and purchase routes are not implemented",
+		Name:         fandangoProviderName,
+		Kind:         kind,
+		Status:       "healthy",
+		Configured:   true,
+		Coverage:     "Personal local runtime; Fandango browser showtimes and read-only seat maps",
+		LocationMode: "postal_or_coordinates",
+		Message:      "GET-only local adapter configured; reservation, token, wallet, payment, and purchase routes are not implemented",
 	}
 	if last.IsZero() {
 		status.Status = "degraded"
@@ -145,7 +147,10 @@ func (f *FandangoLocal) markSuccess() {
 }
 
 func (f *FandangoLocal) Discover(ctx context.Context, query domain.QueryRequest) ([]domain.Showtime, error) {
-	movie, err := f.resolveMovie(ctx, query.MovieQuery)
+	if fandangoPostalCode.FindString(query.Location.Query) == "" && query.Location.Latitude == 0 && query.Location.Longitude == 0 {
+		return nil, errors.New("Fandango location requires a 5-digit US ZIP code or browser location coordinates")
+	}
+	movie, err := f.movieForQuery(ctx, query)
 	if err != nil {
 		return nil, err
 	}
@@ -211,6 +216,64 @@ func (f *FandangoLocal) Discover(ctx context.Context, query domain.QueryRequest)
 	return showtimes, nil
 }
 
+func (f *FandangoLocal) movieForQuery(ctx context.Context, query domain.QueryRequest) (fandangoMovie, error) {
+	if query.MovieID == "" {
+		return f.resolveMovie(ctx, query.MovieQuery)
+	}
+	if !fandangoDigits.MatchString(query.MovieID) {
+		return fandangoMovie{}, errors.New("Fandango movie_id must be numeric")
+	}
+	return fandangoMovie{ID: query.MovieID, Name: query.MovieQuery}, nil
+}
+
+func (f *FandangoLocal) SuggestMovies(ctx context.Context, query string, limit int) ([]domain.MovieSuggestion, error) {
+	query = strings.TrimSpace(query)
+	if len(query) < 2 {
+		return []domain.MovieSuggestion{}, nil
+	}
+	if limit < 1 || limit > 10 {
+		limit = 6
+	}
+	var response fandangoAutocompleteResponse
+	if err := f.getJSON(ctx, "/napi/home/autocompleteDesktopSearch", url.Values{"search": {query}}, &response); err != nil {
+		return nil, err
+	}
+	type rankedMovie struct {
+		movie fandangoMovie
+		score int
+		order int
+	}
+	ranked := make([]rankedMovie, 0, len(response.ResultsByType.Movies.Items))
+	for index, candidate := range response.ResultsByType.Movies.Items {
+		movie, valid := normalizeFandangoMovie(candidate)
+		if valid {
+			ranked = append(ranked, rankedMovie{movie: movie, score: fandangoTitleScore(query, movie.Name), order: index})
+		}
+	}
+	sort.SliceStable(ranked, func(i, j int) bool {
+		if ranked[i].score == ranked[j].score {
+			return ranked[i].order < ranked[j].order
+		}
+		return ranked[i].score > ranked[j].score
+	})
+	if len(ranked) > limit {
+		ranked = ranked[:limit]
+	}
+	suggestions := make([]domain.MovieSuggestion, 0, len(ranked))
+	for _, candidate := range ranked {
+		year := ""
+		if len(candidate.movie.ReleaseDate) >= 4 {
+			year = candidate.movie.ReleaseDate[:4]
+		}
+		suggestions = append(suggestions, domain.MovieSuggestion{
+			ID: candidate.movie.ID, Title: candidate.movie.Name,
+			ReleaseDate: candidate.movie.ReleaseDate, Year: year,
+		})
+	}
+	f.markSuccess()
+	return suggestions, nil
+}
+
 func (f *FandangoLocal) resolveMovie(ctx context.Context, query string) (fandangoMovie, error) {
 	normalized := normalizeText(query)
 	if normalized == "" {
@@ -224,24 +287,21 @@ func (f *FandangoLocal) resolveMovie(ctx context.Context, query string) (fandang
 		return cached.movie, nil
 	}
 
-	var response fandangoAutocompleteResponse
-	if err := f.getJSON(ctx, "/napi/home/autocompleteDesktopSearch", url.Values{"search": {query}}, &response); err != nil {
+	suggestions, err := f.SuggestMovies(ctx, query, 10)
+	if err != nil {
 		return fandangoMovie{}, err
 	}
-	bestScore := -1
+	bestScore := -1 << 30
 	var best fandangoMovie
-	for _, candidate := range response.ResultsByType.Movies.Items {
-		movie, valid := normalizeFandangoMovie(candidate)
-		if !valid {
-			continue
-		}
-		score := fandangoTitleScore(query, movie.Name)
+	for _, candidate := range suggestions {
+		movie := fandangoMovie{ID: candidate.ID, Name: candidate.Title, ReleaseDate: candidate.ReleaseDate}
+		score := fandangoTitleScore(query, candidate.Title)
 		if score > bestScore {
 			bestScore = score
 			best = movie
 		}
 	}
-	if bestScore < 0 {
+	if best.ID == "" {
 		return fandangoMovie{}, fmt.Errorf("Fandango returned no movie match for %q", query)
 	}
 	f.cacheMu.Lock()
@@ -449,9 +509,10 @@ type fandangoAutocompleteMovie struct {
 }
 
 type fandangoMovie struct {
-	ID   string
-	Name string
-	Slug string
+	ID          string
+	Name        string
+	Slug        string
+	ReleaseDate string
 }
 
 func normalizeFandangoMovie(source fandangoAutocompleteMovie) (fandangoMovie, bool) {
@@ -479,7 +540,7 @@ func normalizeFandangoMovie(source fandangoAutocompleteMovie) (fandangoMovie, bo
 	if name == "" {
 		return fandangoMovie{}, false
 	}
-	return fandangoMovie{ID: id, Name: name, Slug: slug}, true
+	return fandangoMovie{ID: id, Name: name, Slug: slug, ReleaseDate: strings.TrimSpace(source.ReleaseDate)}, true
 }
 
 func fandangoTitleScore(query, candidate string) int {
@@ -494,6 +555,10 @@ func fandangoTitleScore(query, candidate string) int {
 		return 1000
 	case compactQuery == compactCandidate:
 		return 950
+	case strings.HasPrefix(compactCandidate, compactQuery):
+		return 850 - (len(compactCandidate) - len(compactQuery))
+	case strings.Contains(compactCandidate, compactQuery):
+		return 700 - (len(compactCandidate) - len(compactQuery))
 	case strings.HasPrefix(candidate, query):
 		return 800 - (len(candidate) - len(query))
 	case strings.Contains(candidate, query):

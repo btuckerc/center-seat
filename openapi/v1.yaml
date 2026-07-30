@@ -10,6 +10,45 @@ servers:
   - url: http://localhost:8080
     description: Local Docker service
 paths:
+  /v1/movie-suggestions:
+    get:
+      operationId: suggestMovies
+      summary: Resolve free-text movie input to canonical provider titles
+      parameters:
+        - name: q
+          in: query
+          required: true
+          schema:
+            type: string
+            minLength: 2
+            maxLength: 160
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 10
+            default: 6
+      responses:
+        "200":
+          description: Ranked canonical movie matches from the configured source
+          headers:
+            ETag:
+              $ref: "#/components/headers/ETag"
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [suggestions]
+                properties:
+                  suggestions:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/MovieSuggestion"
+        "400":
+          $ref: "#/components/responses/Problem"
+        "503":
+          $ref: "#/components/responses/Problem"
   /v1/showtime-queries:
     post:
       operationId: createShowtimeQuery
@@ -102,6 +141,34 @@ paths:
           description: The client already has the current representation
         "404":
           $ref: "#/components/responses/Problem"
+  /v1/seat-queries/{query_id}/recommendations/{rank}:
+    get:
+      operationId: getSeatRecommendation
+      summary: Refresh one recommendation and return its live seat map on demand
+      parameters:
+        - name: query_id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: rank
+          in: path
+          required: true
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 5
+      responses:
+        "200":
+          description: Fresh recommendation detail for the selected screening
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Recommendation"
+        "404":
+          $ref: "#/components/responses/Problem"
+        "503":
+          $ref: "#/components/responses/Problem"
   /v1/providers:
     get:
       operationId: listProviders
@@ -183,6 +250,10 @@ components:
           minLength: 1
           maxLength: 160
           examples: [Dune]
+        movie_id:
+          type: string
+          maxLength: 128
+          description: Optional canonical provider movie identifier selected from movie suggestions.
         location:
           $ref: "#/components/schemas/LocationConstraint"
         dates:
@@ -263,7 +334,8 @@ components:
     LocationConstraint:
       type: object
       additionalProperties: false
-      required: [latitude, longitude, radius_miles]
+      required: [radius_miles]
+      description: Supply latitude and longitude together, or a provider-supported coarse query such as a US ZIP code.
       properties:
         query:
           type: string
@@ -382,6 +454,11 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/Seat"
+        seat_options:
+          type: array
+          description: Equally strong currently available choices for a single-seat query.
+          items:
+            $ref: "#/components/schemas/Seat"
         score:
           type: number
           minimum: 0
@@ -405,7 +482,9 @@ components:
           type: string
           format: uri
         seat_map:
-          $ref: "#/components/schemas/SeatMap"
+          oneOf:
+            - $ref: "#/components/schemas/SeatMap"
+            - type: "null"
     Showtime:
       type: object
       required: [id, movie_title, venue_name, starts_at, format, distance_miles]
@@ -467,6 +546,11 @@ components:
             $ref: "#/components/schemas/Seat"
         target:
           $ref: "#/components/schemas/GeometryPoint"
+        recommended_zone:
+          type: array
+          description: Up to four physical seat positions closest to the profile target, including unavailable positions.
+          items:
+            type: string
         confidence:
           type: string
           enum: [exact_coordinates, rendered_geometry, row_geometry, label_heuristic, visual_inference]
@@ -519,9 +603,24 @@ components:
           type: string
         coverage:
           type: string
+        location_mode:
+          type: string
+          enum: [coordinates, postal_or_coordinates]
         last_success_at:
           type: string
           format: date-time
+    MovieSuggestion:
+      type: object
+      required: [id, title]
+      properties:
+        id:
+          type: string
+        title:
+          type: string
+        release_date:
+          type: string
+        year:
+          type: string
     Problem:
       type: object
       required: [type, title, status, detail]

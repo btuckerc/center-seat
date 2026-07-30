@@ -9,6 +9,7 @@ export type SeatProfile =
 
 export type QueryState = {
   movie: string;
+  movieId?: string;
   location: string;
   latitude?: number;
   longitude?: number;
@@ -63,6 +64,7 @@ export type Recommendation = {
   rank: number;
   showtime: Showtime;
   seats: Seat[];
+  seat_options?: Seat[];
   score: number;
   confidence: string;
   explanation: string[];
@@ -72,6 +74,7 @@ export type Recommendation = {
   seat_map?: {
     seats: Seat[];
     target: { x: number; y: number };
+    recommended_zone?: string[];
     confidence: string;
     observed_at: string;
   };
@@ -112,7 +115,15 @@ export type ProviderStatus = {
   configured: boolean;
   message?: string;
   coverage?: string;
+  location_mode?: "coordinates" | "postal_or_coordinates";
   last_success_at?: string;
+};
+
+export type MovieSuggestion = {
+  id: string;
+  title: string;
+  release_date?: string;
+  year?: string;
 };
 
 const localDate = (date: Date) => {

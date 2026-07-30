@@ -72,3 +72,55 @@ func TestDeadCenterNeverSelectsAnOffCenterSeat(t *testing.T) {
 		t.Fatal("missing dead-center target metadata")
 	}
 }
+
+func TestDeadCenterReturnsAvailableChoicesInsideFourSeatCenterZone(t *testing.T) {
+	inventory := domain.Inventory{Confidence: "exact_coordinates", ObservedAt: time.Now(), Seats: []domain.Seat{
+		{ID: "C5", Label: "C5", Row: "C", Index: 5, X: .28, Y: .50, Type: "recliner", Status: "available"},
+		{ID: "C6", Label: "C6", Row: "C", Index: 6, X: .42, Y: .50, Type: "recliner", Status: "available"},
+		{ID: "C7", Label: "C7", Row: "C", Index: 7, X: .48, Y: .50, Type: "recliner", Status: "available"},
+		{ID: "C8", Label: "C8", Row: "C", Index: 8, X: .52, Y: .50, Type: "recliner", Status: "sold"},
+		{ID: "C9", Label: "C9", Row: "C", Index: 9, X: .58, Y: .50, Type: "recliner", Status: "available"},
+		{ID: "C10", Label: "C10", Row: "C", Index: 10, X: .72, Y: .50, Type: "recliner", Status: "available"},
+	}}
+	recommendation, ok := BestBlock(domain.Showtime{ID: "s1"}, inventory, domain.QueryRequest{
+		TicketCount: 1, SeatProfile: "dead_center",
+	})
+	if !ok {
+		t.Fatal("expected recommendation")
+	}
+	if len(recommendation.SeatOptions) != 3 {
+		t.Fatalf("expected three available center choices, got %v", recommendation.SeatOptions)
+	}
+	if recommendation.SeatMap == nil || len(recommendation.SeatMap.RecommendedZone) != 4 {
+		t.Fatalf("expected four-seat geometric zone, got %#v", recommendation.SeatMap)
+	}
+	if recommendation.SeatMap.RecommendedZone[0] != "C7" || recommendation.SeatMap.RecommendedZone[1] != "C8" {
+		t.Fatalf("zone is not ordered from the center: %v", recommendation.SeatMap.RecommendedZone)
+	}
+}
+
+func TestDeadCenterFallsBackWhenEntireCenterZoneIsUnavailable(t *testing.T) {
+	inventory := domain.Inventory{Confidence: "exact_coordinates", ObservedAt: time.Now(), Seats: []domain.Seat{
+		{ID: "C4", Label: "C4", Row: "C", Index: 4, X: .20, Y: .50, Type: "recliner", Status: "available"},
+		{ID: "C5", Label: "C5", Row: "C", Index: 5, X: .35, Y: .50, Type: "recliner", Status: "sold"},
+		{ID: "C6", Label: "C6", Row: "C", Index: 6, X: .45, Y: .50, Type: "recliner", Status: "sold"},
+		{ID: "C7", Label: "C7", Row: "C", Index: 7, X: .55, Y: .50, Type: "recliner", Status: "held"},
+		{ID: "C8", Label: "C8", Row: "C", Index: 8, X: .65, Y: .50, Type: "recliner", Status: "sold"},
+		{ID: "C9", Label: "C9", Row: "C", Index: 9, X: .80, Y: .50, Type: "recliner", Status: "available"},
+	}}
+	recommendation, ok := BestBlock(domain.Showtime{ID: "s1"}, inventory, domain.QueryRequest{
+		TicketCount: 1, SeatProfile: "dead_center",
+	})
+	if !ok {
+		t.Fatal("expected closest available fallback")
+	}
+	if len(recommendation.SeatOptions) != 1 || recommendation.SeatOptions[0].ID != recommendation.Seats[0].ID {
+		t.Fatalf("expected the ranked fallback as the only option, got %#v", recommendation.SeatOptions)
+	}
+	if len(recommendation.SeatMap.RecommendedZone) != 4 {
+		t.Fatalf("expected the unavailable four-seat ideal zone to remain visible, got %v", recommendation.SeatMap.RecommendedZone)
+	}
+	if got := recommendation.Explanation[0]; got != recommendation.Seats[0].Label+" is the closest available seat; all 4 geometric center-zone positions are unavailable" {
+		t.Fatalf("unexpected explanation: %q", got)
+	}
+}

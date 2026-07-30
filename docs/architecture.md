@@ -6,8 +6,11 @@ provider adapters and stores scale independently.
 
 ```text
 Client
+  ├─ GET /v1/movie-suggestions ── canonical provider title matching
   ├─ POST /v1/showtime-queries ── real discovery without seat claims
   │ POST /v1/seat-queries ─────── exact-seat query when inventory is connected
+  │ GET /v1/seat-queries/{id}/recommendations/{rank}
+  │                              lazy live map for one selected alternative
   ▼
 HTTP contract ── idempotency / validation / request ID / ETag
   ▼
@@ -59,6 +62,12 @@ step. Production startup never selects fixture data implicitly.
 - `GET` results use strong ETags and short private cache headers.
 - Provider responses are normalized before transport handlers see them.
 - Geometry confidence is part of ranking and the public explanation.
+- A single-ticket dead-center query exposes a four-position ideal zone and all
+  currently available equivalent choices; unavailable positions remain visible
+  rather than shifting the geometric target.
+- Initial responses keep alternative maps compact. Opening an alternative
+  refreshes only that screening, limiting upstream fan-out while making results
+  explorable.
 - The final check is read-only. Query traffic never manipulates market
   availability by holding seats.
 - The personal Fandango adapter is rejected outside local/development mode and

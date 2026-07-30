@@ -28,6 +28,7 @@ type TimeConstraint struct {
 
 type QueryRequest struct {
 	MovieQuery                string             `json:"movie_query"`
+	MovieID                   string             `json:"movie_id,omitempty"`
 	Location                  LocationConstraint `json:"location"`
 	Dates                     DateConstraint     `json:"dates"`
 	Time                      TimeConstraint     `json:"time,omitempty"`
@@ -52,6 +53,8 @@ type QueryRequest struct {
 
 func (q *QueryRequest) SetDefaults() {
 	q.MovieQuery = strings.TrimSpace(q.MovieQuery)
+	q.MovieID = strings.TrimSpace(q.MovieID)
+	q.Location.Query = strings.TrimSpace(q.Location.Query)
 	if q.Location.RadiusMiles == 0 {
 		q.Location.RadiusMiles = 25
 	}
@@ -82,14 +85,17 @@ func (q QueryRequest) Validate() error {
 	if q.MovieQuery == "" {
 		return errors.New("movie_query is required")
 	}
-	if q.Location.Latitude == 0 && q.Location.Longitude == 0 {
-		return errors.New("location latitude and longitude are required")
+	if q.Location.Latitude == 0 && q.Location.Longitude == 0 && q.Location.Query == "" {
+		return errors.New("location requires latitude and longitude or a provider-supported location query")
 	}
 	if q.Location.Latitude < -90 || q.Location.Latitude > 90 || q.Location.Longitude < -180 || q.Location.Longitude > 180 {
 		return errors.New("location coordinates are outside valid latitude/longitude bounds")
 	}
 	if q.Location.RadiusMiles <= 0 || q.Location.RadiusMiles > 49 {
 		return errors.New("location.radius_miles must be between 0 and 49")
+	}
+	if len(q.MovieID) > 128 {
+		return errors.New("movie_id cannot exceed 128 characters")
 	}
 	if q.MaxDistanceMiles <= 0 || q.MaxDistanceMiles > 49 {
 		return errors.New("max_distance_miles must be between 0 and 49")
@@ -193,6 +199,7 @@ type Recommendation struct {
 	Rank           int                `json:"rank"`
 	Showtime       Showtime           `json:"showtime"`
 	Seats          []Seat             `json:"seats"`
+	SeatOptions    []Seat             `json:"seat_options,omitempty"`
 	Score          float64            `json:"score"`
 	Confidence     string             `json:"confidence"`
 	Explanation    []string           `json:"explanation"`
@@ -208,10 +215,11 @@ type GeometryPoint struct {
 }
 
 type SeatMap struct {
-	Seats      []Seat        `json:"seats"`
-	Target     GeometryPoint `json:"target"`
-	Confidence string        `json:"confidence"`
-	ObservedAt time.Time     `json:"observed_at"`
+	Seats           []Seat        `json:"seats"`
+	Target          GeometryPoint `json:"target"`
+	RecommendedZone []string      `json:"recommended_zone,omitempty"`
+	Confidence      string        `json:"confidence"`
+	ObservedAt      time.Time     `json:"observed_at"`
 }
 
 type Coverage struct {
@@ -251,5 +259,13 @@ type ProviderStatus struct {
 	Configured    bool       `json:"configured"`
 	Message       string     `json:"message,omitempty"`
 	Coverage      string     `json:"coverage,omitempty"`
+	LocationMode  string     `json:"location_mode,omitempty"`
 	LastSuccessAt *time.Time `json:"last_success_at,omitempty"`
+}
+
+type MovieSuggestion struct {
+	ID          string `json:"id"`
+	Title       string `json:"title"`
+	ReleaseDate string `json:"release_date,omitempty"`
+	Year        string `json:"year,omitempty"`
 }

@@ -9,7 +9,8 @@ const statusLabel: Record<Seat["status"], string> = {
 };
 
 export function SeatMap({ recommendation }: { recommendation: Recommendation }) {
-  const selected = new Set(recommendation.seats.map((seat) => seat.id));
+  const options = recommendation.seat_options?.length ? recommendation.seat_options : recommendation.seats;
+  const selected = new Set(options.map((seat) => seat.id));
   const map = recommendation.seat_map;
   if (!map?.seats.length) {
     return (
@@ -18,6 +19,7 @@ export function SeatMap({ recommendation }: { recommendation: Recommendation }) 
       </div>
     );
   }
+  const recommendedZone = new Set(map.recommended_zone ?? options.map((seat) => seat.id));
 
   const rows = Array.from(
     map.seats.reduce((values, seat) => {
@@ -50,15 +52,21 @@ export function SeatMap({ recommendation }: { recommendation: Recommendation }) 
         ))}
         {map.seats.map((seat) => {
           const isSelected = selected.has(seat.id);
+          const isInZone = recommendedZone.has(seat.id);
           const accessible = seat.type === "wheelchair" || seat.type === "companion";
+          const description = isSelected
+            ? "best available option"
+            : isInZone
+              ? `ideal-zone position, ${statusLabel[seat.status]}`
+              : statusLabel[seat.status];
           return (
             <span
-              aria-label={`${seat.label}, ${isSelected ? "recommended" : statusLabel[seat.status]}${accessible ? ", accessible" : ""}`}
-              className={`map-seat status-${seat.status}${isSelected ? " recommended" : ""}${accessible ? " accessible-seat" : ""}`}
+              aria-label={`${seat.label}, ${description}${accessible ? ", accessible" : ""}`}
+              className={`map-seat status-${seat.status}${isInZone ? " ideal-zone-seat" : ""}${isSelected ? " recommended" : ""}${accessible ? " accessible-seat" : ""}`}
               key={seat.id}
               role="img"
               style={{ left: `${6 + seat.x * 88}%`, top: `${8 + seat.y * 82}%` }}
-              title={`${seat.label} · ${isSelected ? "recommended" : statusLabel[seat.status]}`}
+              title={`${seat.label} · ${description}`}
             >
               {isSelected ? <b>{seat.label}</b> : null}
             </span>
@@ -70,7 +78,7 @@ export function SeatMap({ recommendation }: { recommendation: Recommendation }) 
         <span><i className="map-seat status-sold" />Occupied</span>
         <span><i className="map-seat status-held" />Held</span>
         <span><i className="map-seat status-house" />Blocked</span>
-        <span><i className="map-seat recommended" />Your best</span>
+        <span><i className="map-seat recommended" />Best available</span>
         <span><i className="map-seat accessible-seat" />Accessible</span>
       </div>
       <div className="map-confidence">

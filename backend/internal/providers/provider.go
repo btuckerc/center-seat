@@ -11,6 +11,10 @@ type Discovery interface {
 	Discover(context.Context, domain.QueryRequest) ([]domain.Showtime, error)
 }
 
+type MovieSuggester interface {
+	SuggestMovies(context.Context, string, int) ([]domain.MovieSuggestion, error)
+}
+
 type Inventory interface {
 	Name() string
 	Supports(domain.Showtime) bool

@@ -68,7 +68,7 @@ func (a *Atom) ProviderStatus(kind string) domain.ProviderStatus {
 	a.statusMu.RUnlock()
 	status := domain.ProviderStatus{
 		Name: a.Name(), Kind: kind, Status: "healthy", Configured: true,
-		Coverage: "Atom Tickets partner network", Message: "Partner API key configured",
+		Coverage: "Atom Tickets partner network", LocationMode: "coordinates", Message: "Partner API key configured",
 	}
 	if last.IsZero() {
 		status.Status = "degraded"

@@ -62,8 +62,9 @@ func (o *OpenCinema) ProviderStatus(kind string) domain.ProviderStatus {
 	o.statusMu.RUnlock()
 	status := domain.ProviderStatus{
 		Name: o.Name(), Kind: kind, Status: "healthy", Configured: true,
-		Coverage: "Independent, repertory, and arthouse cinemas",
-		Message:  "Self-service Open Cinema API key configured",
+		Coverage:     "Independent, repertory, and arthouse cinemas",
+		LocationMode: "coordinates",
+		Message:      "Self-service Open Cinema API key configured",
 	}
 	if last.IsZero() {
 		status.Status = "degraded"

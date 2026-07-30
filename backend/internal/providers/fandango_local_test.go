@@ -31,7 +31,7 @@ func TestFandangoLocalReadOnlyDiscoveryAndInventory(t *testing.T) {
 					"movies": map[string]any{
 						"items": []map[string]any{
 							{"id": "111", "name": "A Different Film", "link": "/a-different-film-2026-111/movie-overview"},
-							{"id": "243819", "name": "Spider-Man: Brand New Day", "link": "/spider-man-brand-new-day-2026-243819/movie-overview"},
+							{"id": "243819", "name": "Spider-Man: Brand New Day", "link": "/spider-man-brand-new-day-2026-243819/movie-overview", "releaseDate": "2026-07-31"},
 						},
 					},
 				},
@@ -75,6 +75,10 @@ func TestFandangoLocalReadOnlyDiscoveryAndInventory(t *testing.T) {
 	}
 	if err := provider.Check(context.Background()); err != nil {
 		t.Fatal(err)
+	}
+	suggestions, err := provider.SuggestMovies(context.Background(), "spiderman brand", 6)
+	if err != nil || len(suggestions) == 0 || suggestions[0].ID != "243819" || suggestions[0].Year != "2026" {
+		t.Fatalf("canonical suggestions were not ranked and normalized: %#v, %v", suggestions, err)
 	}
 	query := domain.QueryRequest{
 		MovieQuery: "spiderman brand new day",
@@ -130,7 +134,7 @@ func TestFandangoLocalReadOnlyDiscoveryAndInventory(t *testing.T) {
 	if seatMapReads.Load() != 2 {
 		t.Fatalf("final verification did not bypass the cache, reads=%d", seatMapReads.Load())
 	}
-	if provider.ProviderStatus("inventory").Status != "healthy" {
+	if provider.ProviderStatus("inventory").Status != "healthy" || provider.ProviderStatus("inventory").LocationMode != "postal_or_coordinates" {
 		t.Fatal("successful reads should report a healthy local provider")
 	}
 }
