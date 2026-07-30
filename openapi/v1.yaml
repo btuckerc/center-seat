@@ -1,0 +1,451 @@
+openapi: 3.1.0
+info:
+  title: CenterSeat API
+  version: 1.0.0
+  description: |
+    Contract for discovering screenings, fetching live seat inventory, and
+    returning explainable best-seat recommendations. Query endpoints never hold
+    or purchase seats.
+servers:
+  - url: http://localhost:8080
+    description: Local Docker service
+paths:
+  /v1/seat-queries:
+    post:
+      operationId: createSeatQuery
+      summary: Find the best available seats across matching screenings
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SeatQueryRequest"
+      responses:
+        "200":
+          description: A fresh, ranked recommendation
+          headers:
+            ETag:
+              $ref: "#/components/headers/ETag"
+            X-Request-ID:
+              $ref: "#/components/headers/RequestID"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SeatQueryResponse"
+        "400":
+          $ref: "#/components/responses/Problem"
+        "422":
+          $ref: "#/components/responses/Problem"
+        "503":
+          $ref: "#/components/responses/Problem"
+  /v1/seat-queries/{query_id}:
+    get:
+      operationId: getSeatQuery
+      summary: Read a previously completed query
+      parameters:
+        - name: query_id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: If-None-Match
+          in: header
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Cached query result
+          headers:
+            ETag:
+              $ref: "#/components/headers/ETag"
+            Cache-Control:
+              schema:
+                type: string
+              description: Private, short-lived result caching policy
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SeatQueryResponse"
+        "304":
+          description: The client already has the current representation
+        "404":
+          $ref: "#/components/responses/Problem"
+  /v1/providers:
+    get:
+      operationId: listProviders
+      summary: Inspect configured discovery and inventory providers
+      responses:
+        "200":
+          description: Provider capability and health summary
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [providers]
+                properties:
+                  providers:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/ProviderStatus"
+  /healthz:
+    get:
+      operationId: health
+      summary: Liveness probe
+      responses:
+        "200":
+          description: Process is alive
+  /readyz:
+    get:
+      operationId: ready
+      summary: Readiness probe
+      responses:
+        "200":
+          description: Service can accept traffic
+  /metrics:
+    get:
+      operationId: metrics
+      summary: Prometheus-compatible service metrics
+      responses:
+        "200":
+          description: Metrics exposition
+components:
+  parameters:
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: false
+      description: Reuses the first result for the same key and request body.
+      schema:
+        type: string
+        minLength: 8
+        maxLength: 128
+  headers:
+    ETag:
+      schema:
+        type: string
+      description: Strong entity tag for the response body.
+    RequestID:
+      schema:
+        type: string
+      description: Correlation ID used in structured logs.
+  responses:
+    Problem:
+      description: RFC 9457 problem detail
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+  schemas:
+    SeatQueryRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - movie_query
+        - location
+        - dates
+        - ticket_count
+        - seat_profile
+      properties:
+        movie_query:
+          type: string
+          minLength: 1
+          maxLength: 160
+          examples: [Dune]
+        location:
+          $ref: "#/components/schemas/LocationConstraint"
+        dates:
+          $ref: "#/components/schemas/DateConstraint"
+        time:
+          $ref: "#/components/schemas/TimeConstraint"
+        ticket_count:
+          type: integer
+          minimum: 1
+          maximum: 12
+        seat_profile:
+          type: string
+          enum: [balanced, dead_center, two_thirds_back, aisle, front, back]
+        formats:
+          type: array
+          uniqueItems: true
+          items:
+            type: string
+            enum: [standard, imax, dolby, xd, rpdx, screenx, 3d, drive_in]
+        language:
+          type: string
+        captions:
+          type: string
+          enum: [any, open, closed, none]
+          default: any
+        audio_description:
+          type: boolean
+          default: false
+        wheelchair_spaces:
+          type: integer
+          minimum: 0
+          maximum: 6
+          default: 0
+        companion_seats:
+          type: integer
+          minimum: 0
+          maximum: 6
+          default: 0
+        amenities_required:
+          type: array
+          uniqueItems: true
+          items:
+            type: string
+            enum: [recliner, dine_in, alcohol, laser_projection, reserved_seating]
+        max_distance_miles:
+          type: number
+          exclusiveMinimum: 0
+          maximum: 250
+          default: 25
+        max_total_price:
+          type: number
+          minimum: 0
+        min_start_notice_minutes:
+          type: integer
+          minimum: 0
+          maximum: 1440
+          default: 30
+        allow_split_party:
+          type: boolean
+          default: false
+        allow_unknown_price:
+          type: boolean
+          default: true
+        exclude_first_rows:
+          type: integer
+          minimum: 0
+          maximum: 10
+          default: 1
+        minimum_geometry_confidence:
+          type: string
+          enum: [exact_coordinates, rendered_geometry, row_geometry, label_heuristic]
+          default: row_geometry
+        candidate_limit:
+          type: integer
+          minimum: 1
+          maximum: 25
+          default: 12
+    LocationConstraint:
+      type: object
+      additionalProperties: false
+      required: [radius_miles]
+      properties:
+        query:
+          type: string
+          description: City, postal code, neighborhood, or address.
+        latitude:
+          type: number
+          minimum: -90
+          maximum: 90
+        longitude:
+          type: number
+          minimum: -180
+          maximum: 180
+        radius_miles:
+          type: number
+          exclusiveMinimum: 0
+          maximum: 250
+    DateConstraint:
+      type: object
+      additionalProperties: false
+      required: [start, end]
+      properties:
+        start:
+          type: string
+          format: date
+        end:
+          type: string
+          format: date
+    TimeConstraint:
+      type: object
+      additionalProperties: false
+      properties:
+        mode:
+          type: string
+          enum: [any, inside, outside, before, after]
+          default: any
+        start:
+          type: string
+          pattern: "^([01]\\d|2[0-3]):[0-5]\\d$"
+        end:
+          type: string
+          pattern: "^([01]\\d|2[0-3]):[0-5]\\d$"
+        timezone:
+          type: string
+          examples: [America/New_York]
+    SeatQueryResponse:
+      type: object
+      required: [query_id, status, generated_at, expires_at, coverage, winner, alternatives]
+      properties:
+        query_id:
+          type: string
+        status:
+          type: string
+          enum: [complete, partial, no_match]
+        generated_at:
+          type: string
+          format: date-time
+        expires_at:
+          type: string
+          format: date-time
+        coverage:
+          $ref: "#/components/schemas/Coverage"
+        winner:
+          oneOf:
+            - $ref: "#/components/schemas/Recommendation"
+            - type: "null"
+        alternatives:
+          type: array
+          items:
+            $ref: "#/components/schemas/Recommendation"
+        warnings:
+          type: array
+          items:
+            type: string
+    Recommendation:
+      type: object
+      required:
+        - rank
+        - showtime
+        - seats
+        - score
+        - confidence
+        - explanation
+        - verified_at
+        - booking_url
+      properties:
+        rank:
+          type: integer
+        showtime:
+          $ref: "#/components/schemas/Showtime"
+        seats:
+          type: array
+          items:
+            $ref: "#/components/schemas/Seat"
+        score:
+          type: number
+          minimum: 0
+          maximum: 100
+          description: Higher is better.
+        confidence:
+          type: string
+          enum: [exact_coordinates, rendered_geometry, row_geometry, label_heuristic, visual_inference]
+        explanation:
+          type: array
+          items:
+            type: string
+        score_breakdown:
+          type: object
+          additionalProperties:
+            type: number
+        verified_at:
+          type: string
+          format: date-time
+        booking_url:
+          type: string
+          format: uri
+    Showtime:
+      type: object
+      required: [id, movie_title, venue_name, starts_at, format, distance_miles]
+      properties:
+        id:
+          type: string
+        movie_title:
+          type: string
+        venue_name:
+          type: string
+        auditorium_name:
+          type: string
+        starts_at:
+          type: string
+          format: date-time
+        format:
+          type: string
+        distance_miles:
+          type: number
+        total_price:
+          type: number
+        currency:
+          type: string
+        amenities:
+          type: array
+          items:
+            type: string
+    Seat:
+      type: object
+      required: [id, label, row, x, y, type, status]
+      properties:
+        id:
+          type: string
+        label:
+          type: string
+        row:
+          type: string
+        x:
+          type: number
+          minimum: 0
+          maximum: 1
+        y:
+          type: number
+          minimum: 0
+          maximum: 1
+        type:
+          type: string
+          enum: [standard, recliner, wheelchair, companion, sofa]
+        status:
+          type: string
+          enum: [available, sold, held, broken, house]
+    Coverage:
+      type: object
+      required: [screenings_discovered, screenings_pruned, inventories_checked, inventories_fresh, elapsed_ms]
+      properties:
+        screenings_discovered:
+          type: integer
+        screenings_pruned:
+          type: integer
+        inventories_checked:
+          type: integer
+        inventories_fresh:
+          type: integer
+        providers_degraded:
+          type: integer
+        elapsed_ms:
+          type: integer
+    ProviderStatus:
+      type: object
+      required: [name, kind, status]
+      properties:
+        name:
+          type: string
+        kind:
+          type: string
+          enum: [discovery, inventory, booking_link]
+        status:
+          type: string
+          enum: [healthy, degraded, disabled]
+        coverage:
+          type: string
+        last_success_at:
+          type: string
+          format: date-time
+    Problem:
+      type: object
+      required: [type, title, status, detail]
+      properties:
+        type:
+          type: string
+          format: uri-reference
+        title:
+          type: string
+        status:
+          type: integer
+        detail:
+          type: string
+        instance:
+          type: string
+          format: uri-reference
