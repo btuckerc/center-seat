@@ -3,7 +3,9 @@ package service
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -168,6 +170,91 @@ func TestQueryPromotesNextCandidateWhenWinnerChangesDuringVerification(t *testin
 	}
 	if !strings.Contains(strings.Join(result.Warnings, " "), "promoted") {
 		t.Fatalf("expected promotion to be explained, got %v", result.Warnings)
+	}
+}
+
+func TestQueryStopsAfterAutomaticInitialCoverageWhenResultIsStrong(t *testing.T) {
+	provider := &adaptiveTestProvider{}
+	svc := New(provider, provider, 8)
+	result, err := svc.Query(context.Background(), "qry_adaptive_fast", adaptiveTestQuery())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Winner == nil || !result.Coverage.WinnerVerified {
+		t.Fatalf("expected a verified winner, got %#v", result)
+	}
+	if result.Coverage.InventoriesChecked != adaptiveInitialCandidates {
+		t.Fatalf("expected automatic search to stop after %d strong checks, got %#v", adaptiveInitialCandidates, result.Coverage)
+	}
+	if provider.initialReads.Load() != adaptiveInitialCandidates {
+		t.Fatalf("expected %d initial provider reads, got %d", adaptiveInitialCandidates, provider.initialReads.Load())
+	}
+}
+
+func TestQueryAutomaticallyExpandsAndRecoversFromStaleCandidates(t *testing.T) {
+	provider := &adaptiveTestProvider{failInitialBatch: true}
+	svc := New(provider, provider, 8)
+	result, err := svc.Query(context.Background(), "qry_adaptive_expand", adaptiveTestQuery())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Winner == nil || !result.Coverage.WinnerVerified {
+		t.Fatalf("expected expansion to recover a verified winner, got %#v", result)
+	}
+	expected := adaptiveInitialCandidates + adaptiveExpansionBatch
+	if result.Coverage.InventoriesChecked != expected || result.Coverage.InventoriesFailed != adaptiveInitialCandidates {
+		t.Fatalf("expected one automatic expansion after the stale batch, got %#v", result.Coverage)
+	}
+	if result.Status != "complete" || len(result.Warnings) != 0 {
+		t.Fatalf("recovered, verified searches should stay out of the user's way: %#v", result)
+	}
+}
+
+type adaptiveTestProvider struct {
+	initialReads     atomic.Int32
+	failInitialBatch bool
+}
+
+func (*adaptiveTestProvider) Name() string { return "adaptive-test" }
+
+func (*adaptiveTestProvider) Supports(domain.Showtime) bool { return true }
+
+func (*adaptiveTestProvider) MaxConcurrentInventoryReads() int { return 4 }
+
+func (*adaptiveTestProvider) Discover(_ context.Context, query domain.QueryRequest) ([]domain.Showtime, error) {
+	day, err := time.Parse(time.DateOnly, query.Dates.Start)
+	if err != nil {
+		return nil, err
+	}
+	showtimes := make([]domain.Showtime, 0, 18)
+	for index := 0; index < 18; index++ {
+		showtimes = append(showtimes, domain.Showtime{
+			ID: fmt.Sprintf("adaptive-%02d", index), MovieTitle: query.MovieQuery,
+			VenueName: "Adaptive Cinema", StartsAt: day.Add(20*time.Hour + time.Duration(index)*time.Minute),
+			Format: "dolby", DistanceMiles: 1 + float64(index)/10, ReservedSeating: true,
+			InventoryProvider: "test-fixture", Amenities: []string{"recliner", "reserved_seating"},
+		})
+	}
+	return showtimes, nil
+}
+
+func (provider *adaptiveTestProvider) GetAvailability(ctx context.Context, showtime domain.Showtime, final bool) (domain.Inventory, error) {
+	if !final {
+		provider.initialReads.Add(1)
+		if provider.failInitialBatch && showtime.ID < "adaptive-04" {
+			return domain.Inventory{}, errors.New("Fandango read failed: connection reset by peer")
+		}
+	}
+	return (testfixtures.Provider{}).GetAvailability(ctx, showtime, final)
+}
+
+func adaptiveTestQuery() domain.QueryRequest {
+	today := time.Now().Format(time.DateOnly)
+	return domain.QueryRequest{
+		MovieQuery: "The Test Film",
+		Location:   domain.LocationConstraint{Query: "28202", Latitude: 35.2271, Longitude: -80.8431, RadiusMiles: 25},
+		Dates:      domain.DateConstraint{Start: today, End: today}, TicketCount: 1,
+		SeatProfile: "dead_center", MaxDistanceMiles: 25, CandidateLimit: 18,
 	}
 }
 

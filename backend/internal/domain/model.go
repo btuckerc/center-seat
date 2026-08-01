@@ -77,7 +77,7 @@ func (q *QueryRequest) SetDefaults() {
 		q.MinimumGeometryConfidence = "row_geometry"
 	}
 	if q.CandidateLimit == 0 {
-		q.CandidateLimit = 12
+		q.CandidateLimit = 18
 	}
 }
 

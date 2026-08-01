@@ -21,6 +21,20 @@ type Service struct {
 	fanout    int
 }
 
+const (
+	adaptiveInitialCandidates = 4
+	adaptiveExpansionBatch    = 4
+	adaptiveMinimumFresh      = 4
+	adaptiveMinimumResults    = 2
+	adaptiveStrongScore       = 92.0
+)
+
+type inventoryCandidateResult struct {
+	recommendation domain.Recommendation
+	outcome        string
+	failureReason  string
+}
+
 func New(discovery providers.Discovery, inventory providers.Inventory, fanout int) *Service {
 	if fanout < 1 {
 		fanout = 6
@@ -106,79 +120,44 @@ func (s *Service) Query(ctx context.Context, queryID string, q domain.QueryReque
 		return domain.QueryResponse{QueryID: queryID, Status: "no_match", GeneratedAt: now, ExpiresAt: now.Add(30 * time.Second), Coverage: coverage, Alternatives: []domain.Recommendation{}, Warnings: []string{"No screenings matched every hard constraint"}}, nil
 	}
 
-	type result struct {
-		recommendation domain.Recommendation
-		outcome        string
-		failureReason  string
-	}
-	results := make(chan result, len(filtered))
-	sem := make(chan struct{}, s.fanout)
-	var wg sync.WaitGroup
-	for _, showtime := range filtered {
-		if !s.inventory.Supports(showtime) {
-			continue
-		}
-		wg.Add(1)
-		go func(st domain.Showtime) {
-			defer wg.Done()
-			sem <- struct{}{}
-			defer func() { <-sem }()
-			inventoryCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-			defer cancel()
-			inventory, err := s.inventory.GetAvailability(inventoryCtx, st, false)
-			if err != nil {
-				results <- result{outcome: "failed", failureReason: inventoryFailureReason(err)}
-				return
-			}
-			st, ok := applyInventoryPricing(st, inventory, q)
-			if !ok {
-				results <- result{outcome: "price_rejected"}
-				return
-			}
-			recommendation, ok := ranking.BestBlock(st, inventory, q)
-			if !ok {
-				results <- result{outcome: "unavailable"}
-				return
-			}
-			recommendation.Score = combinedScore(recommendation.Score, st, q)
-			results <- result{recommendation: recommendation, outcome: "recommended"}
-		}(showtime)
-	}
-	wg.Wait()
-	close(results)
-
 	recommendations := make([]domain.Recommendation, 0, len(filtered))
-	for candidate := range results {
-		coverage.InventoriesChecked++
-		switch candidate.outcome {
-		case "failed":
-			coverage.InventoriesFailed++
-			coverage.InventoryFailureReasons[candidate.failureReason]++
-		case "price_rejected":
-			coverage.InventoriesFresh++
-			coverage.ScreeningsPriceRejected++
-		case "unavailable":
-			coverage.InventoriesFresh++
-			coverage.ScreeningsUnavailable++
-		case "recommended":
-			coverage.InventoriesFresh++
-			recommendations = append(recommendations, candidate.recommendation)
+	for offset, batchSize := 0, adaptiveInitialCandidates; offset < len(filtered); batchSize = adaptiveExpansionBatch {
+		end := offset + batchSize
+		if end > len(filtered) {
+			end = len(filtered)
+		}
+		for _, candidate := range s.evaluateInventoryBatch(ctx, filtered[offset:end], q) {
+			coverage.InventoriesChecked++
+			switch candidate.outcome {
+			case "failed":
+				coverage.InventoriesFailed++
+				coverage.InventoryFailureReasons[candidate.failureReason]++
+			case "price_rejected":
+				coverage.InventoriesFresh++
+				coverage.ScreeningsPriceRejected++
+			case "unavailable":
+				coverage.InventoriesFresh++
+				coverage.ScreeningsUnavailable++
+			case "recommended":
+				coverage.InventoriesFresh++
+				recommendations = append(recommendations, candidate.recommendation)
+			}
+		}
+		sort.Slice(recommendations, func(i, j int) bool { return recommendations[i].Score > recommendations[j].Score })
+		offset = end
+		if adaptiveCoverageIsStrong(coverage, recommendations) {
+			break
 		}
 	}
 	coverage.ProvidersDegraded = coverage.InventoriesFailed
-	sort.Slice(recommendations, func(i, j int) bool { return recommendations[i].Score > recommendations[j].Score })
 	status := "complete"
 	warnings := []string{}
-	if coverage.InventoriesFailed > 0 {
-		status = "partial"
-		warnings = append(warnings, inventoryFailureWarning(coverage))
-	}
 	if len(recommendations) == 0 {
 		status = "no_match"
 		if coverage.InventoriesFresh > 0 {
-			warnings = append(warnings, "Live maps loaded successfully, but no screening satisfied every seat, party, accessibility, and price constraint")
+			warnings = append(warnings, "Live availability was checked, but no screening satisfied every seat, party, accessibility, and price constraint")
 		} else {
-			warnings = append(warnings, "No live seat map was available to rank")
+			warnings = append(warnings, "No live seat availability was available to rank")
 		}
 	}
 
@@ -214,6 +193,12 @@ func (s *Service) Query(ctx context.Context, queryID string, q domain.QueryReque
 		status = "no_match"
 		warnings = append(warnings, "No screening remained eligible after final live verification")
 	}
+	if coverage.InventoriesFailed > 0 && !adaptiveResultIsReliable(coverage, recommendations) {
+		if status != "no_match" {
+			status = "partial"
+		}
+		warnings = append(warnings, inventoryFailureWarning())
+	}
 
 	now := time.Now().UTC()
 	coverage.ElapsedMS = int(time.Since(started).Milliseconds())
@@ -237,18 +222,80 @@ func (s *Service) Query(ctx context.Context, queryID string, q domain.QueryReque
 	return response, nil
 }
 
+func (s *Service) evaluateInventoryBatch(ctx context.Context, showtimes []domain.Showtime, q domain.QueryRequest) []inventoryCandidateResult {
+	results := make(chan inventoryCandidateResult, len(showtimes))
+	sem := make(chan struct{}, s.fanout)
+	var wg sync.WaitGroup
+	for _, showtime := range showtimes {
+		if !s.inventory.Supports(showtime) {
+			continue
+		}
+		wg.Add(1)
+		go func(st domain.Showtime) {
+			defer wg.Done()
+			select {
+			case sem <- struct{}{}:
+			case <-ctx.Done():
+				results <- inventoryCandidateResult{outcome: "failed", failureReason: inventoryFailureReason(ctx.Err())}
+				return
+			}
+			defer func() { <-sem }()
+			inventoryCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+			defer cancel()
+			inventory, err := s.inventory.GetAvailability(inventoryCtx, st, false)
+			if err != nil {
+				results <- inventoryCandidateResult{outcome: "failed", failureReason: inventoryFailureReason(err)}
+				return
+			}
+			st, ok := applyInventoryPricing(st, inventory, q)
+			if !ok {
+				results <- inventoryCandidateResult{outcome: "price_rejected"}
+				return
+			}
+			recommendation, ok := ranking.BestBlock(st, inventory, q)
+			if !ok {
+				results <- inventoryCandidateResult{outcome: "unavailable"}
+				return
+			}
+			recommendation.Score = combinedScore(recommendation.Score, st, q)
+			results <- inventoryCandidateResult{recommendation: recommendation, outcome: "recommended"}
+		}(showtime)
+	}
+	wg.Wait()
+	close(results)
+	batch := make([]inventoryCandidateResult, 0, len(showtimes))
+	for candidate := range results {
+		batch = append(batch, candidate)
+	}
+	return batch
+}
+
+func adaptiveCoverageIsStrong(coverage domain.Coverage, recommendations []domain.Recommendation) bool {
+	return coverage.InventoriesFresh >= adaptiveMinimumFresh &&
+		len(recommendations) >= adaptiveMinimumResults &&
+		recommendations[0].Score >= adaptiveStrongScore
+}
+
+func adaptiveResultIsReliable(coverage domain.Coverage, recommendations []domain.Recommendation) bool {
+	return coverage.WinnerVerified && adaptiveCoverageIsStrong(coverage, recommendations)
+}
+
 func inventoryFailureReason(err error) string {
 	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
 		return "timeout"
 	}
 	message := strings.ToLower(err.Error())
 	switch {
+	case strings.Contains(message, "http 408"):
+		return "timeout"
 	case strings.Contains(message, "http 429"):
 		return "rate_limited"
 	case strings.Contains(message, "http 401"), strings.Contains(message, "http 403"):
 		return "provider_rejected"
-	case strings.Contains(message, "http 404"), strings.Contains(message, "no longer"):
+	case strings.Contains(message, "http 404"), strings.Contains(message, "http 409"), strings.Contains(message, "http 410"), strings.Contains(message, "http 422"), strings.Contains(message, "no longer"):
 		return "not_available"
+	case strings.Contains(message, "read failed"), strings.Contains(message, "unexpected eof"), strings.Contains(message, "connection reset"), strings.Contains(message, "broken pipe"):
+		return "transport_error"
 	case strings.Contains(message, "decode"), strings.Contains(message, "payload"), strings.Contains(message, "seat geometry"):
 		return "invalid_layout"
 	default:
@@ -256,17 +303,8 @@ func inventoryFailureReason(err error) string {
 	}
 }
 
-func inventoryFailureWarning(coverage domain.Coverage) string {
-	reasons := make([]string, 0, len(coverage.InventoryFailureReasons))
-	for reason, count := range coverage.InventoryFailureReasons {
-		reasons = append(reasons, fmt.Sprintf("%s: %d", humanFailureReason(reason), count))
-	}
-	sort.Strings(reasons)
-	detail := strings.Join(reasons, ", ")
-	if detail != "" {
-		detail = "; " + detail
-	}
-	return fmt.Sprintf("%d of %d live seat maps could not be loaded%s. Recommendations use %d successfully loaded maps", coverage.InventoriesFailed, coverage.InventoriesChecked, detail, coverage.InventoriesFresh)
+func inventoryFailureWarning() string {
+	return "Some screenings changed before their live availability could be compared. CenterSeat automatically used the checks that completed successfully."
 }
 
 func humanFailureReason(reason string) string {
@@ -281,6 +319,8 @@ func humanFailureReason(reason string) string {
 		return "no longer available"
 	case "invalid_layout":
 		return "invalid layout"
+	case "transport_error":
+		return "connection interrupted"
 	default:
 		return "provider error"
 	}

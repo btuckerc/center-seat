@@ -87,7 +87,7 @@ func NewFandangoLocal(config FandangoLocalConfig, client *http.Client) (*Fandang
 		config.MinimumDelay = 175 * time.Millisecond
 	}
 	if config.MaxConcurrency < 1 || config.MaxConcurrency > 4 {
-		config.MaxConcurrency = 2
+		config.MaxConcurrency = 4
 	}
 	if client == nil {
 		client = &http.Client{Timeout: config.RequestTimeout}
@@ -410,21 +410,30 @@ func (f *FandangoLocal) getJSON(ctx context.Context, path string, query url.Valu
 		response, err := f.client.Do(request)
 		f.releaseRequestSlot()
 		if err != nil {
+			if attempt < 2 && ctx.Err() == nil {
+				if retryErr := waitForFandangoRetry(ctx, attempt); retryErr != nil {
+					return retryErr
+				}
+				continue
+			}
 			return fmt.Errorf("Fandango read failed: %w", err)
 		}
 		body, readErr := io.ReadAll(io.LimitReader(response.Body, 16<<20))
 		_ = response.Body.Close()
 		if readErr != nil {
-			return readErr
+			if attempt < 2 && ctx.Err() == nil {
+				if retryErr := waitForFandangoRetry(ctx, attempt); retryErr != nil {
+					return retryErr
+				}
+				continue
+			}
+			return fmt.Errorf("Fandango response read failed: %w", readErr)
 		}
 		if retryableReadStatus(response.StatusCode) && attempt < 2 {
-			delay := time.Duration(150*(1<<attempt))*time.Millisecond + retryJitter()
-			select {
-			case <-time.After(delay):
-				continue
-			case <-ctx.Done():
-				return ctx.Err()
+			if retryErr := waitForFandangoRetry(ctx, attempt); retryErr != nil {
+				return retryErr
 			}
+			continue
 		}
 		if response.StatusCode < 200 || response.StatusCode >= 300 {
 			return fmt.Errorf("Fandango read returned HTTP %d", response.StatusCode)
@@ -433,6 +442,12 @@ func (f *FandangoLocal) getJSON(ctx context.Context, path string, query url.Valu
 			return nil
 		}
 		if err := json.Unmarshal(body, destination); err != nil {
+			if attempt < 2 && ctx.Err() == nil {
+				if retryErr := waitForFandangoRetry(ctx, attempt); retryErr != nil {
+					return retryErr
+				}
+				continue
+			}
 			return fmt.Errorf("decode Fandango read response: %w", err)
 		}
 		return nil
@@ -469,11 +484,24 @@ func (f *FandangoLocal) waitForRequestSlot(ctx context.Context) error {
 func (f *FandangoLocal) releaseRequestSlot() { <-f.gate }
 
 func retryableReadStatus(status int) bool {
-	return status == http.StatusInternalServerError ||
+	return status == http.StatusRequestTimeout ||
+		status == http.StatusInternalServerError ||
 		status == http.StatusTooManyRequests ||
 		status == http.StatusBadGateway ||
 		status == http.StatusServiceUnavailable ||
 		status == http.StatusGatewayTimeout
+}
+
+func waitForFandangoRetry(ctx context.Context, attempt int) error {
+	delay := time.Duration(150*(1<<attempt))*time.Millisecond + retryJitter()
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 func allowedFandangoReadPath(path string) bool {

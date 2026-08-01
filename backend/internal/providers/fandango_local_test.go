@@ -3,8 +3,11 @@ package providers
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -211,6 +214,40 @@ func TestFandangoLocalRetriesObservedReadFailures(t *testing.T) {
 	if attempts.Load() != 3 {
 		t.Fatalf("expected two bounded retries, got %d attempts", attempts.Load())
 	}
+}
+
+func TestFandangoLocalRetriesInterruptedTransportReads(t *testing.T) {
+	var attempts atomic.Int32
+	client := &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		if attempts.Add(1) < 3 {
+			return nil, errors.New("connection reset by peer")
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader(`{"resultsByType":{}}`)),
+			Request:    request,
+		}, nil
+	})}
+	provider, err := NewFandangoLocal(FandangoLocalConfig{
+		BaseURL: defaultFandangoBaseURL, RequestTimeout: 2 * time.Second, MinimumDelay: time.Millisecond,
+	}, client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var response fandangoAutocompleteResponse
+	if err := provider.getJSON(context.Background(), "/napi/home/autocompleteDesktopSearch", nil, &response); err != nil {
+		t.Fatal(err)
+	}
+	if attempts.Load() != 3 {
+		t.Fatalf("expected interrupted transport reads to receive two bounded retries, got %d attempts", attempts.Load())
+	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (roundTrip roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {
+	return roundTrip(request)
 }
 
 func assertFandangoLocationQuery(t *testing.T, request *http.Request) {

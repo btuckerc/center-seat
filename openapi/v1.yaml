@@ -330,7 +330,9 @@ components:
           type: integer
           minimum: 1
           maximum: 25
-          default: 12
+          default: 18
+          deprecated: true
+          description: Compatibility-only upper bound. Interactive clients should omit this; the service expands live coverage automatically until it has a strong result.
     LocationConstraint:
       type: object
       additionalProperties: false

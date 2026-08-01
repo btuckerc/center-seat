@@ -29,7 +29,7 @@ services:
       ATOM_PARTNER_ID: ${ATOM_PARTNER_ID:-}
       FANDANGO_BASE_URL: ${FANDANGO_BASE_URL:-https://www.fandango.com}
       FANDANGO_MINIMUM_DELAY_MS: ${FANDANGO_MINIMUM_DELAY_MS:-175}
-      FANDANGO_MAX_CONCURRENCY: ${FANDANGO_MAX_CONCURRENCY:-2}
+      FANDANGO_MAX_CONCURRENCY: ${FANDANGO_MAX_CONCURRENCY:-4}
       DATABASE_URL: postgres://centerseat:${POSTGRES_PASSWORD:?required}@postgres:5432/centerseat?sslmode=disable
       REDIS_URL: redis://redis:6379/0
     ports:

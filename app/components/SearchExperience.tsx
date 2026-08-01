@@ -37,7 +37,7 @@ type ProviderState = "checking" | "ready" | "discovery" | "unconfigured" | "unav
 type TrendingState = "loading" | "ready" | "unavailable";
 type Problem = { title: string; detail: string; status?: number };
 type SavedPreferences = Pick<QueryState,
-  "location" | "tickets" | "profile" | "formats" | "maxDistance" | "candidateLimit" |
+  "location" | "tickets" | "profile" | "formats" | "maxDistance" |
   "recliners" | "captions" | "audioDescription" | "wheelchairSpaces" | "companionSeats" |
   "excludeFirstRows" | "allowSplit" | "limitPrice" | "maxPrice"
 >;
@@ -246,7 +246,6 @@ export function SearchExperience() {
       profile: draft.profile,
       formats: draft.formats,
       maxDistance: draft.maxDistance,
-      candidateLimit: draft.candidateLimit,
       recliners: draft.recliners,
       captions: draft.captions,
       audioDescription: draft.audioDescription,
@@ -294,7 +293,6 @@ export function SearchExperience() {
       exclude_first_rows: draft.excludeFirstRows,
       allow_split_party: draft.allowSplit,
       minimum_geometry_confidence: "row_geometry",
-      candidate_limit: draft.candidateLimit,
     };
     try {
       const endpoint = providerState === "ready" ? "/api/seat-queries" : "/api/showtime-queries";
@@ -480,7 +478,6 @@ export function SearchExperience() {
                   <label className="field"><FieldLabel>To</FieldLabel><input type="time" value={draft.endTime} disabled={draft.timeMode === "any" || draft.timeMode === "after"} onChange={(event) => update("endTime", event.target.value)} /></label>
                   <fieldset className="format-fieldset full-span"><legend>Formats</legend><div className="chip-row six-chips">{formatOptions.map((format) => <button aria-pressed={draft.formats.includes(format)} className={draft.formats.includes(format) ? "format-chip active" : "format-chip"} key={format} onClick={() => toggleFormat(format)} type="button"><span>{draft.formats.includes(format) ? "✓" : "+"}</span>{format}</button>)}</div></fieldset>
                   <label className="field range-field"><FieldLabel>Distance <em>{draft.maxDistance} mi</em></FieldLabel><input type="range" min="2" max="49" value={draft.maxDistance} onChange={(event) => update("maxDistance", Number(event.target.value))} /></label>
-                  <label className="field"><FieldLabel>Search depth</FieldLabel><select value={draft.candidateLimit} onChange={(event) => update("candidateLimit", Number(event.target.value))}><option value="6">Fast · 6 maps</option><option value="12">Balanced · 12 maps</option><option value="18">Thorough · 18 maps</option></select></label>
                   <label className="check-field"><input type="checkbox" checked={draft.limitPrice} onChange={(event) => update("limitPrice", event.target.checked)} /><span><b>Price ceiling</b><small>{draft.limitPrice ? `$${draft.maxPrice} total` : "Any price"}</small></span></label>
                   {draft.limitPrice ? <label className="field range-field"><FieldLabel>Maximum total <em>${draft.maxPrice}</em></FieldLabel><input type="range" min="10" max="200" step="5" value={draft.maxPrice} onChange={(event) => update("maxPrice", Number(event.target.value))} /></label> : null}
                   <label className="field"><FieldLabel>Captions</FieldLabel><select value={draft.captions} onChange={(event) => update("captions", event.target.value)}><option value="any">Any captions</option><option value="open">Open required</option><option value="closed">Closed required</option><option value="none">No captions</option></select></label>
@@ -510,7 +507,7 @@ function ProblemPanel({ problem, onRetry }: { problem: Problem; onRetry: () => v
 }
 
 function InfoDialog({ onClose }: { onClose: () => void }) {
-  return <div className="modal-layer info-layer" onMouseDown={onClose}><div aria-labelledby="info-title" aria-modal="true" className="info-dialog" onMouseDown={(event) => event.stopPropagation()} role="dialog"><div className="dialog-head"><div><span>THE SHORT VERSION</span><h2 id="info-title">How CenterSeat chooses.</h2><p>Expensive live checks happen only after easy exclusions.</p></div><button aria-label="Close explanation" onClick={onClose} type="button">×</button></div><ol className="compact-method"><li><b>1</b><span>Discover<small>Every matching date and showtime</small></span></li><li><b>2</b><span>Filter<small>Time, distance, format, price and access</small></span></li><li><b>3</b><span>Read maps<small>Only the strongest 6–18 candidates</small></span></li><li><b>4</b><span>Rank geometry<small>Real coordinates, not seat-label guesses</small></span></li><li><b>5</b><span>Recheck<small>The winner gets one final live read</small></span></li></ol><p className="info-note">CenterSeat never creates a cart, hold, or purchase. Availability may change until the theater confirms it.</p></div></div>;
+  return <div className="modal-layer info-layer" onMouseDown={onClose}><div aria-labelledby="info-title" aria-modal="true" className="info-dialog" onMouseDown={(event) => event.stopPropagation()} role="dialog"><div className="dialog-head"><div><span>THE SHORT VERSION</span><h2 id="info-title">How CenterSeat chooses.</h2><p>Expensive live checks happen only after easy exclusions.</p></div><button aria-label="Close explanation" onClick={onClose} type="button">×</button></div><ol className="compact-method"><li><b>1</b><span>Discover<small>Every matching date and showtime</small></span></li><li><b>2</b><span>Filter<small>Time, distance, format, price and access</small></span></li><li><b>3</b><span>Compare live seats<small>Starts with the strongest screenings and expands automatically when needed</small></span></li><li><b>4</b><span>Rank geometry<small>Real coordinates, not seat-label guesses</small></span></li><li><b>5</b><span>Recheck<small>The winner gets one final live read</small></span></li></ol><p className="info-note">CenterSeat never creates a cart, hold, or purchase. Availability may change until the theater confirms it.</p></div></div>;
 }
 
 function ShowtimeResults({ result }: { result: ShowtimeQueryResponse }) {
@@ -520,7 +517,7 @@ function ShowtimeResults({ result }: { result: ShowtimeQueryResponse }) {
 function QueryDiagnostics({ coverage }: { coverage: SeatQueryResponse["coverage"] }) {
   const failed = coverage.inventories_failed ?? coverage.providers_degraded ?? 0;
   const reasons = Object.entries(coverage.inventory_failure_reasons ?? {}).filter(([, count]) => count > 0).map(([reason, count]) => `${count} ${humanize(reason).toLowerCase()}`).join(" · ");
-  return <div className="compact-diagnostics"><span><b>{coverage.inventories_fresh}/{coverage.inventories_checked}</b> maps loaded</span><span><b>{coverage.screenings_unavailable ?? 0}</b> no eligible block</span><span><b>{coverage.screenings_price_rejected ?? 0}</b> price filtered</span><span className={failed ? "has-failure" : ""}><b>{failed}</b> failed{reasons ? <small>{reasons}</small> : null}</span></div>;
+  return <div className="compact-diagnostics"><span><b>{coverage.inventories_fresh}/{coverage.inventories_checked}</b> live checks complete</span><span><b>{coverage.screenings_unavailable ?? 0}</b> no matching seats</span><span><b>{coverage.screenings_price_rejected ?? 0}</b> over price</span><span className={failed ? "has-failure" : ""}><b>{failed}</b> checks unavailable{reasons ? <small>{reasons}</small> : null}</span></div>;
 }
 
 function LiveResult({ result }: { result: SeatQueryResponse }) {

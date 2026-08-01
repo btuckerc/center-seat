@@ -120,7 +120,7 @@ export async function queryOpenCinema(query: ShowtimeQuery): Promise<ShowtimeQue
     parameters.set("cursor", payload.pagination.next_cursor);
   }
 
-  const limit = Math.max(1, Math.min(query.candidate_limit ?? 12, 25));
+  const limit = Math.max(1, Math.min(query.candidate_limit ?? 18, 25));
   const showtimes = discovered
     .filter((screening) => matchesScreening(screening, query))
     .map(normalizeScreening)

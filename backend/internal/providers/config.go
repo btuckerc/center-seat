@@ -41,7 +41,7 @@ func FromEnvironment() (Discovery, Inventory, error) {
 			BaseURL:        os.Getenv("FANDANGO_BASE_URL"),
 			RequestTimeout: 8 * time.Second,
 			MinimumDelay:   time.Duration(environmentInt("FANDANGO_MINIMUM_DELAY_MS", 175)) * time.Millisecond,
-			MaxConcurrency: environmentInt("FANDANGO_MAX_CONCURRENCY", 2),
+			MaxConcurrency: environmentInt("FANDANGO_MAX_CONCURRENCY", 4),
 		}, nil)
 		if err != nil {
 			return nil, nil, err

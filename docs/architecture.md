@@ -17,7 +17,7 @@ HTTP contract ── idempotency / validation / request ID / ETag
 Query service
   ├── cached discovery adapter ── configured showtime source
   ├── constraint planner ──────── local filtering and candidate scoring
-  ├── bounded fan-out ─────────── live inventory adapters (5–12 candidates)
+  ├── adaptive fan-out ────────── parallel live checks; expands only as needed
   ├── geometry ranker ─────────── contiguous blocks + confidence penalties
   └── final verifier ──────────── one uncached read-only availability check
   ▼
@@ -31,7 +31,7 @@ Winner + alternatives + score explanation + freshness + booking URL
 | Request normalization | 5 ms | Return a 422 problem detail |
 | Cached discovery | 50 ms p95 | Fall back to a secondary licensed feed |
 | Candidate pruning | 10 ms p95 | Deterministic, local operation |
-| Live seat read | 5 s per candidate | Return partial coverage with normalized failure reasons |
+| Live seat read | 5 s per candidate | Retry transient transport failures; expand to another batch when needed |
 | Ranking | 20 ms p95 | Exclude unrankable low-confidence maps |
 | Winner verification | 5 s hard timeout | Mark result partial; never create a hold |
 | End to end | 3 s typical | Preserve explainable partial results during upstream degradation |
@@ -56,11 +56,16 @@ step. Production startup never selects fixture data implicitly.
 ## Reliability rules
 
 - Per-provider deadlines and concurrency limits protect the query path.
+- Live checks start with the strongest four candidates in parallel and expand in
+  bounded batches only when the result lacks enough successful comparisons or a
+  high-confidence winner. This is an internal decision, not a user setting.
 - Inventory failures degrade individual candidates, not the whole search.
 - A successfully loaded map with no eligible block or an excessive live price
   is counted as a normal exclusion, not mislabeled as an upstream failure.
-- Partial responses include normalized failure categories without leaking
-  provider payloads or request details.
+- A verified result with sufficient successful comparisons remains complete
+  even if stale candidates failed. Materially reduced coverage returns a
+  normalized partial response without leaking provider payloads or request
+  details.
 - Idempotency keys bind to canonical request hashes; key reuse with another body
   returns a conflict.
 - `GET` results use strong ETags and short private cache headers.

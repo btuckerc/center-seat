@@ -24,7 +24,6 @@ export type QueryState = {
   maxDistance: number;
   maxPrice: number;
   limitPrice: boolean;
-  candidateLimit: number;
   recliners: boolean;
   captions: string;
   audioDescription: boolean;
@@ -169,7 +168,6 @@ export function createDefaultQuery(): QueryState {
     maxDistance: 25,
     maxPrice: 60,
     limitPrice: false,
-    candidateLimit: 12,
     recliners: false,
     captions: "any",
     audioDescription: false,

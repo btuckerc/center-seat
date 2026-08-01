@@ -62,8 +62,8 @@ test("uses provider geometry and separates discovery from seat inventory", async
   assert.match(search, /dates: \{ start: draft\.dateStart, end: draft\.dateEnd \}/);
   assert.match(search, /hasPostalLocation/);
   assert.match(search, /Live source warming up/);
-  assert.match(search, /Search depth/);
-  assert.match(search, /candidate_limit: draft\.candidateLimit/);
+  assert.doesNotMatch(search, /Search depth|Fast · 6 maps|candidate_limit: draft\.candidateLimit/);
+  assert.match(search, /expands automatically when needed/);
   assert.match(search, /movie_id/);
   assert.match(search, /movie-suggestions/);
   assert.match(search, /seat-recommendations/);
