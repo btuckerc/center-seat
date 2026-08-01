@@ -35,6 +35,15 @@ func TestOpenCinemaModeRequiresAPIKey(t *testing.T) {
 	}
 }
 
+func TestProviderConstructionDoesNotRequireUpstreamNetwork(t *testing.T) {
+	t.Setenv("CENTERSEAT_PROVIDER_MODE", "opencinema")
+	t.Setenv("OPEN_CINEMA_API_KEY", "configured-for-test")
+	t.Setenv("OPEN_CINEMA_API_BASE_URL", "https://127.0.0.1:1")
+	if _, _, err := FromEnvironment(); err != nil {
+		t.Fatalf("expected validated configuration to start without an upstream probe: %v", err)
+	}
+}
+
 func TestFandangoLocalModeCannotRunAsProductionProvider(t *testing.T) {
 	t.Setenv("CENTERSEAT_PROVIDER_MODE", "fandango-local")
 	t.Setenv("CENTERSEAT_ENV", "production")

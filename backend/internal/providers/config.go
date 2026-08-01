@@ -1,9 +1,7 @@
 package providers
 
 import (
-	"context"
 	"errors"
-	"fmt"
 	"os"
 	"strconv"
 	"strings"
@@ -22,11 +20,6 @@ func FromEnvironment() (Discovery, Inventory, error) {
 		if err != nil {
 			return nil, nil, err
 		}
-		probeContext, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		if err := provider.Check(probeContext); err != nil {
-			return nil, nil, fmt.Errorf("Open Cinema startup probe failed: %w", err)
-		}
 		return provider, NewUnavailableInventory("Open Cinema supplies live showtimes and checkout links, but not per-seat inventory"), nil
 	case "atom":
 		provider, err := NewAtom(AtomConfig{
@@ -37,11 +30,6 @@ func FromEnvironment() (Discovery, Inventory, error) {
 		}, nil)
 		if err != nil {
 			return nil, nil, err
-		}
-		probeContext, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		if err := provider.Check(probeContext); err != nil {
-			return nil, nil, fmt.Errorf("Atom startup probe failed: %w", err)
 		}
 		return provider, provider, nil
 	case "fandango-local":
@@ -57,11 +45,6 @@ func FromEnvironment() (Discovery, Inventory, error) {
 		}, nil)
 		if err != nil {
 			return nil, nil, err
-		}
-		probeContext, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		if err := provider.Check(probeContext); err != nil {
-			return nil, nil, fmt.Errorf("Fandango local read-only startup probe failed: %w", err)
 		}
 		return provider, provider, nil
 	case "":

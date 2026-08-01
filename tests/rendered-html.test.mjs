@@ -61,6 +61,7 @@ test("uses provider geometry and separates discovery from seat inventory", async
   assert.match(seatMap, /geometry-centerline/);
   assert.match(search, /dates: \{ start: draft\.dateStart, end: draft\.dateEnd \}/);
   assert.match(search, /hasPostalLocation/);
+  assert.match(search, /Provider configured · live check pending/);
   assert.match(search, /movie_id/);
   assert.match(search, /movie-suggestions/);
   assert.match(search, /seat-recommendations/);

@@ -24,3 +24,10 @@ type Inventory interface {
 type StatusReporter interface {
 	ProviderStatus(kind string) domain.ProviderStatus
 }
+
+// HealthChecker performs a read-only upstream probe. Configuration validation
+// belongs in provider constructors; transient network failures must not prevent
+// the API process from starting.
+type HealthChecker interface {
+	Check(context.Context) error
+}

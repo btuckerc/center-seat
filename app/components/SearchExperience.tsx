@@ -80,6 +80,7 @@ export function SearchExperience() {
   const [locating, setLocating] = useState(false);
   const [locationProblem, setLocationProblem] = useState("");
   const [postalLocationSupported, setPostalLocationSupported] = useState(false);
+  const [providerDegraded, setProviderDegraded] = useState(false);
   const [movieSuggestions, setMovieSuggestions] = useState<MovieSuggestion[]>([]);
   const [suggestionsOpen, setSuggestionsOpen] = useState(false);
   const [activeSuggestion, setActiveSuggestion] = useState(-1);
@@ -95,12 +96,14 @@ export function SearchExperience() {
         };
         if (!active) return;
         const statuses = payload.providers ?? [];
-        const discoveryReady = statuses.some((provider) => provider.kind === "discovery" && provider.configured && provider.status === "healthy");
-        const inventoryReady = statuses.some((provider) => provider.kind === "inventory" && provider.configured && provider.status === "healthy");
-        setPostalLocationSupported(statuses.some((provider) => provider.kind === "discovery" && provider.configured && provider.status === "healthy" && provider.location_mode === "postal_or_coordinates"));
-        if (response.ok && discoveryReady && inventoryReady) {
+        const discoveryConfigured = statuses.some((provider) => provider.kind === "discovery" && provider.configured && provider.status !== "disabled");
+        const inventoryConfigured = statuses.some((provider) => provider.kind === "inventory" && provider.configured && provider.status !== "disabled");
+        const configuredStatuses = statuses.filter((provider) => provider.configured && provider.status !== "disabled");
+        setProviderDegraded(configuredStatuses.some((provider) => provider.status !== "healthy"));
+        setPostalLocationSupported(statuses.some((provider) => provider.kind === "discovery" && provider.configured && provider.status !== "disabled" && provider.location_mode === "postal_or_coordinates"));
+        if (response.ok && discoveryConfigured && inventoryConfigured) {
           setProviderState("ready");
-        } else if (response.ok && discoveryReady) {
+        } else if (response.ok && discoveryConfigured) {
           setProviderState("discovery");
         } else {
           setProviderState("unconfigured");
@@ -279,6 +282,9 @@ export function SearchExperience() {
     unconfigured: "Provider setup required",
     unavailable: "Provider health unavailable",
   }[providerState];
+  const effectiveProviderText = providerDegraded && (providerState === "ready" || providerState === "discovery")
+    ? "Provider configured · live check pending"
+    : providerText;
 
   const searchText = searching
     ? "Querying live providers…"
@@ -299,7 +305,7 @@ export function SearchExperience() {
           <span className="brand-mark">C</span><span>CENTERSEAT</span>
         </a>
         <div className="topbar-right">
-          <span className={`network-status ${providerState}`}><i />{providerText}</span>
+          <span className={`network-status ${providerState}${providerDegraded ? " degraded" : ""}`}><i />{effectiveProviderText}</span>
           <a className="text-link" href="#method">How it works</a>
         </div>
       </header>
