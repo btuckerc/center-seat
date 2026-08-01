@@ -234,7 +234,7 @@ export function SearchExperience() {
       exclude_first_rows: draft.excludeFirstRows,
       allow_split_party: draft.allowSplit,
       minimum_geometry_confidence: "row_geometry",
-      candidate_limit: 12,
+      candidate_limit: draft.candidateLimit,
     };
     try {
       const endpoint = providerState === "ready" ? "/api/seat-queries" : "/api/showtime-queries";
@@ -484,6 +484,15 @@ export function SearchExperience() {
                 <FieldLabel>Maximum distance <em>{draft.maxDistance} mi</em></FieldLabel>
                 <input type="range" min="2" max="49" value={draft.maxDistance} onChange={(event) => update("maxDistance", Number(event.target.value))} />
               </label>
+              <label className="field">
+                <FieldLabel>Search depth</FieldLabel>
+                <select value={draft.candidateLimit} onChange={(event) => update("candidateLimit", Number(event.target.value))}>
+                  <option value="6">Fast · check 6 maps</option>
+                  <option value="12">Balanced · check 12 maps</option>
+                  <option value="18">Thorough · check 18 maps</option>
+                </select>
+                <span className="field-hint">More maps can improve coverage but take longer.</span>
+              </label>
               <label className="check-field price-toggle">
                 <input type="checkbox" checked={draft.limitPrice} onChange={(event) => update("limitPrice", event.target.checked)} />
                 <span><b>Set price ceiling</b><small>{draft.limitPrice ? `$${draft.maxPrice} total` : "Do not filter unknown prices"}</small></span>
@@ -554,7 +563,7 @@ export function SearchExperience() {
         <ol className="method-steps">
           <li><span>01</span><div><b>Discover every date</b><p>Configured live showtimes are normalized across the full requested date range.</p></div><small>1–31 days</small></li>
           <li><span>02</span><div><b>Prune cheaply</b><p>Time, distance, price, format, accessibility, and amenity constraints reduce fan-out.</p></div><small>Local operation</small></li>
-          <li><span>03</span><div><b>Check in parallel</b><p>Only top candidates receive bounded live-inventory requests.</p></div><small>5–12 maps</small></li>
+          <li><span>03</span><div><b>Check in parallel</b><p>Only top candidates receive bounded live-inventory requests. Search depth lets you trade speed for wider coverage.</p></div><small>6–18 maps</small></li>
           <li><span>04</span><div><b>Rank actual geometry</b><p>The same coordinate model drives both scoring and the map you see.</p></div><small>One authority</small></li>
           <li><span>05</span><div><b>Verify the winner</b><p>A final read-only refresh prevents stale recommendations without creating holds.</p></div><small>Live read</small></li>
         </ol>
@@ -593,6 +602,25 @@ function ShowtimeResults({ result }: { result: ShowtimeQueryResponse }) {
       )}
       {result.warnings?.length ? <div className="result-warnings">{result.warnings.map((warning) => <span key={warning}>{warning}</span>)}</div> : null}
     </>
+  );
+}
+
+function QueryDiagnostics({ coverage }: { coverage: SeatQueryResponse["coverage"] }) {
+  const failed = coverage.inventories_failed ?? coverage.providers_degraded ?? 0;
+  const unavailable = coverage.screenings_unavailable ?? 0;
+  const priceRejected = coverage.screenings_price_rejected ?? 0;
+  if (!failed && !unavailable && !priceRejected) return null;
+  const failureReasons = Object.entries(coverage.inventory_failure_reasons ?? {})
+    .filter(([, count]) => count > 0)
+    .map(([reason, count]) => `${count} ${humanize(reason).toLowerCase()}`)
+    .join(" · ");
+  return (
+    <div className="query-diagnostics" aria-label="Live map query details">
+      <div><span>QUERY COVERAGE</span><b>{coverage.inventories_fresh} of {coverage.inventories_checked} maps loaded</b></div>
+      {unavailable ? <p><strong>{unavailable}</strong><span>No eligible block<small>The map loaded; current seats or party rules eliminated it.</small></span></p> : null}
+      {priceRejected ? <p><strong>{priceRejected}</strong><span>Outside price limit<small>The live map loaded, then the total-price rule excluded it.</small></span></p> : null}
+      {failed ? <p className="diagnostic-failure"><strong>{failed}</strong><span>Map read failed<small>{failureReasons || "The provider did not return a usable map."}</small></span></p> : null}
+    </div>
   );
 }
 
@@ -636,14 +664,17 @@ function LiveResult({ result }: { result: SeatQueryResponse }) {
     : "";
   const showtime = showtimeLabels(active);
   const availableCount = active.seat_map?.seats.filter((seat) => seat.status === "available").length ?? 0;
+  const activeIsFinal = active.rank !== 1 || result.coverage.winner_verified;
   return (
     <>
       <div className="coverage-strip" aria-label="Query coverage">
         <span><b>{result.coverage.screenings_discovered}</b> discovered</span><i>→</i>
         <span><b>{result.coverage.screenings_pruned}</b> matched constraints</span><i>→</i>
-        <span><b>{result.coverage.inventories_checked}</b> live maps checked</span><i>→</i>
-        <span className="verified"><b>1</b> winner reverified</span><small>{result.coverage.elapsed_ms} ms</small>
+        <span><b>{result.coverage.inventories_fresh}</b> live maps loaded</span><i>→</i>
+        {(result.coverage.inventories_failed ?? 0) > 0 ? <><span className="coverage-problem"><b>{result.coverage.inventories_failed}</b> failed</span><i>→</i></> : null}
+        {result.coverage.winner_verified ? <span className="verified"><b>1</b> winner reverified</span> : <span className="coverage-problem"><b>!</b> final refresh incomplete</span>}<small>{result.coverage.elapsed_ms} ms</small>
       </div>
+      <QueryDiagnostics coverage={result.coverage} />
       <article className="winner-card" id="active-seat-map">
         <div className="winner-main">
           <div className="winner-head"><div><span className="winner-label">{active.rank === 1 ? "BEST AVAILABLE" : `ALTERNATIVE 0${active.rank}`} · LIVE</span><h3>{optionLabels.join(" · ")}</h3><p>{active.showtime.venue_name}{active.showtime.auditorium_name ? ` · ${active.showtime.auditorium_name}` : ""}</p>{zoneSummary ? <small className="option-summary">{zoneSummary}</small> : null}</div><div className="score-ring" aria-label={`${active.score} percent match`}><strong>{active.score}</strong><small>/100</small><span>MATCH</span></div></div>
@@ -656,7 +687,7 @@ function LiveResult({ result }: { result: SeatQueryResponse }) {
           <SeatMap recommendation={active} />
         </div>
         <aside className="winner-aside">
-          <div className="freshness"><span><i />LIVE INVENTORY</span><b>Verified {new Intl.DateTimeFormat(undefined, { hour: "numeric", minute: "2-digit", second: "2-digit" }).format(new Date(active.verified_at))}</b><small>No order or seat hold was created</small></div>
+          <div className="freshness"><span><i />{activeIsFinal ? "FINAL LIVE CHECK" : "INITIAL LIVE CHECK"}</span><b>Observed {new Intl.DateTimeFormat(undefined, { hour: "numeric", minute: "2-digit", second: "2-digit" }).format(new Date(active.verified_at))}</b><small>No order or seat hold was created</small></div>
           <div className="why-block"><span className="aside-kicker">WHY THIS RANKS</span><h4>{active.explanation[0]}</h4><ul>{Object.entries(active.score_breakdown).map(([key, value]) => <li key={key}><b>{Math.round(value)}</b><span>{humanize(key)}<small>{key === "horizontal_alignment" ? `Target x ${(active.seat_map?.target.x ?? .5) * 100}%` : "Provider geometry"}</small></span></li>)}</ul></div>
           {active.booking_url ? <a className="booking-link" href={active.booking_url} target="_blank" rel="noreferrer">Open provider booking page <span>↗</span></a> : <div className="booking-unavailable">No provider booking link was returned. CenterSeat will not invent one.</div>}
           <p className="booking-note">Query-only release. Availability can change until the theater confirms a purchase.</p>

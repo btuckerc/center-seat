@@ -571,7 +571,7 @@ components:
           maximum: 1
     Coverage:
       type: object
-      required: [screenings_discovered, screenings_pruned, inventories_checked, inventories_fresh, elapsed_ms]
+      required: [screenings_discovered, screenings_pruned, inventories_checked, inventories_fresh, inventories_failed, screenings_unavailable, screenings_price_rejected, inventory_failure_reasons, winner_verified, elapsed_ms]
       properties:
         screenings_discovered:
           type: integer
@@ -581,8 +581,28 @@ components:
           type: integer
         inventories_fresh:
           type: integer
+          description: Seat maps successfully loaded, including maps that had no eligible seat block.
+        inventories_failed:
+          type: integer
+          description: Seat-map reads that failed because of an upstream, timeout, or payload error.
+        screenings_unavailable:
+          type: integer
+          description: Successfully loaded maps with no block satisfying the seat and party constraints.
+        screenings_price_rejected:
+          type: integer
+          description: Successfully loaded maps rejected by the live price constraint.
+        inventory_failure_reasons:
+          type: object
+          description: Normalized, non-sensitive failure categories and their counts.
+          additionalProperties:
+            type: integer
+        winner_verified:
+          type: boolean
+          description: True only when the returned winner passed a final uncached availability read.
         providers_degraded:
           type: integer
+          deprecated: true
+          description: Legacy alias for the failed inventory-read count.
         elapsed_ms:
           type: integer
     ProviderStatus:

@@ -21,6 +21,13 @@ type Inventory interface {
 	GetAvailability(context.Context, domain.Showtime, bool) (domain.Inventory, error)
 }
 
+// InventoryReadPolicy lets a provider keep the service fan-out aligned with
+// its own upstream concurrency limit instead of queueing requests behind a
+// second, tighter gate until their contexts expire.
+type InventoryReadPolicy interface {
+	MaxConcurrentInventoryReads() int
+}
+
 type StatusReporter interface {
 	ProviderStatus(kind string) domain.ProviderStatus
 }

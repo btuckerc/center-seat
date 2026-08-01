@@ -190,6 +190,18 @@ func (s *Server) createQuery(w http.ResponseWriter, r *http.Request) {
 		s.problem(w, r, http.StatusServiceUnavailable, "Seat query failed", err.Error())
 		return
 	}
+	s.logger.Info("seat query evaluated",
+		"query_id", queryID,
+		"status", response.Status,
+		"screenings_discovered", response.Coverage.ScreeningsDiscovered,
+		"candidates", response.Coverage.ScreeningsPruned,
+		"maps_loaded", response.Coverage.InventoriesFresh,
+		"maps_failed", response.Coverage.InventoriesFailed,
+		"no_eligible_block", response.Coverage.ScreeningsUnavailable,
+		"price_rejected", response.Coverage.ScreeningsPriceRejected,
+		"failure_reasons", response.Coverage.InventoryFailureReasons,
+		"winner_verified", response.Coverage.WinnerVerified,
+	)
 	encoded, _ := json.Marshal(response)
 	etagHash := sha256.Sum256(encoded)
 	requestCopy := request

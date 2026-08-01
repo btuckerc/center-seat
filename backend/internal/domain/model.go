@@ -223,12 +223,17 @@ type SeatMap struct {
 }
 
 type Coverage struct {
-	ScreeningsDiscovered int `json:"screenings_discovered"`
-	ScreeningsPruned     int `json:"screenings_pruned"`
-	InventoriesChecked   int `json:"inventories_checked"`
-	InventoriesFresh     int `json:"inventories_fresh"`
-	ProvidersDegraded    int `json:"providers_degraded"`
-	ElapsedMS            int `json:"elapsed_ms"`
+	ScreeningsDiscovered    int            `json:"screenings_discovered"`
+	ScreeningsPruned        int            `json:"screenings_pruned"`
+	InventoriesChecked      int            `json:"inventories_checked"`
+	InventoriesFresh        int            `json:"inventories_fresh"`
+	InventoriesFailed       int            `json:"inventories_failed"`
+	ScreeningsUnavailable   int            `json:"screenings_unavailable"`
+	ScreeningsPriceRejected int            `json:"screenings_price_rejected"`
+	InventoryFailureReasons map[string]int `json:"inventory_failure_reasons"`
+	WinnerVerified          bool           `json:"winner_verified"`
+	ProvidersDegraded       int            `json:"providers_degraded"`
+	ElapsedMS               int            `json:"elapsed_ms"`
 }
 
 type QueryResponse struct {

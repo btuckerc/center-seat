@@ -343,6 +343,10 @@ func (f *FandangoLocal) Supports(showtime domain.Showtime) bool {
 	return showtime.InventoryProvider == fandangoProviderName && showtime.SeatLayoutID != ""
 }
 
+func (f *FandangoLocal) MaxConcurrentInventoryReads() int {
+	return f.config.MaxConcurrency
+}
+
 func (f *FandangoLocal) GetAvailability(ctx context.Context, showtime domain.Showtime, final bool) (domain.Inventory, error) {
 	if !f.Supports(showtime) {
 		return domain.Inventory{}, errors.New("Fandango local inventory does not support this showtime")

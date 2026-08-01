@@ -31,10 +31,10 @@ Winner + alternatives + score explanation + freshness + booking URL
 | Request normalization | 5 ms | Return a 422 problem detail |
 | Cached discovery | 50 ms p95 | Fall back to a secondary licensed feed |
 | Candidate pruning | 10 ms p95 | Deterministic, local operation |
-| Live seat fan-out | 1.8 s hard timeout | Return partial coverage explicitly |
+| Live seat read | 5 s per candidate | Return partial coverage with normalized failure reasons |
 | Ranking | 20 ms p95 | Exclude unrankable low-confidence maps |
-| Winner verification | 1.8 s hard timeout | Mark result partial; never create a hold |
-| End to end | 2.5 s p95 | Preserve explainable partial results |
+| Winner verification | 5 s hard timeout | Mark result partial; never create a hold |
+| End to end | 3 s typical | Preserve explainable partial results during upstream degradation |
 
 ## Cache policy
 
@@ -57,6 +57,10 @@ step. Production startup never selects fixture data implicitly.
 
 - Per-provider deadlines and concurrency limits protect the query path.
 - Inventory failures degrade individual candidates, not the whole search.
+- A successfully loaded map with no eligible block or an excessive live price
+  is counted as a normal exclusion, not mislabeled as an upstream failure.
+- Partial responses include normalized failure categories without leaking
+  provider payloads or request details.
 - Idempotency keys bind to canonical request hashes; key reuse with another body
   returns a conflict.
 - `GET` results use strong ETags and short private cache headers.
@@ -70,6 +74,8 @@ step. Production startup never selects fixture data implicitly.
   explorable.
 - The final check is read-only. Query traffic never manipulates market
   availability by holding seats.
+- If the leading screening loses its eligible block during final verification,
+  it is removed and the next ranked candidate is verified before promotion.
 - The personal Fandango adapter is rejected outside local/development mode and
   has no code path for token, reservation, cart, wallet, payment, or purchase
   operations.

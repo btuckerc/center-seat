@@ -2,6 +2,8 @@ package service
 
 import (
 	"context"
+	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -33,6 +35,9 @@ func TestQueryReturnsVerifiedWinnerAndAlternatives(t *testing.T) {
 	}
 	if result.Winner.VerifiedAt.IsZero() {
 		t.Fatal("winner was not verified")
+	}
+	if !result.Coverage.WinnerVerified {
+		t.Fatal("expected final winner verification to be reported")
 	}
 }
 
@@ -102,6 +107,117 @@ func TestTimeWindowUsesRequestedTimezone(t *testing.T) {
 	}) {
 		t.Fatal("expected 23:30 UTC to match the 19:00–20:00 New York window")
 	}
+}
+
+func TestQuerySeparatesMapFailuresFromValidExclusions(t *testing.T) {
+	discovery := testfixtures.Provider{}
+	inventory := diagnosticInventory{base: discovery}
+	svc := New(discovery, inventory, 6)
+	if svc.fanout != 2 {
+		t.Fatalf("expected provider concurrency policy to cap fan-out at 2, got %d", svc.fanout)
+	}
+	today := time.Now().Format(time.DateOnly)
+	maximum := 50.0
+	result, err := svc.Query(context.Background(), "qry_diagnostics", domain.QueryRequest{
+		MovieQuery: "The Test Film",
+		Location: domain.LocationConstraint{
+			Query: "28202", Latitude: 35.2271, Longitude: -80.8431, RadiusMiles: 25,
+		},
+		Dates: domain.DateConstraint{Start: today, End: today}, TicketCount: 1,
+		SeatProfile: "balanced", MaxDistanceMiles: 25, CandidateLimit: 12,
+		MaxTotalPrice: &maximum, AllowUnknownPrice: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	coverage := result.Coverage
+	if coverage.InventoriesChecked != 4 || coverage.InventoriesFresh != 3 || coverage.InventoriesFailed != 1 {
+		t.Fatalf("unexpected inventory coverage: %#v", coverage)
+	}
+	if coverage.ScreeningsUnavailable != 1 || coverage.ScreeningsPriceRejected != 1 {
+		t.Fatalf("expected normal exclusions to be counted separately: %#v", coverage)
+	}
+	if coverage.InventoryFailureReasons["rate_limited"] != 1 {
+		t.Fatalf("expected normalized rate-limit diagnostic: %#v", coverage.InventoryFailureReasons)
+	}
+	if result.Winner == nil || result.Status != "partial" {
+		t.Fatalf("expected a partial result from the remaining valid map: %#v", result)
+	}
+}
+
+func TestQueryPromotesNextCandidateWhenWinnerChangesDuringVerification(t *testing.T) {
+	discovery := testfixtures.Provider{}
+	svc := New(discovery, promotionInventory{base: discovery}, 4)
+	today := time.Now().Format(time.DateOnly)
+	result, err := svc.Query(context.Background(), "qry_promote", domain.QueryRequest{
+		MovieQuery: "The Test Film",
+		Location: domain.LocationConstraint{
+			Query: "28202", Latitude: 35.2271, Longitude: -80.8431, RadiusMiles: 25,
+		},
+		Dates: domain.DateConstraint{Start: today, End: today}, TicketCount: 1,
+		SeatProfile: "balanced", MaxDistanceMiles: 25, CandidateLimit: 12,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Winner == nil || result.Winner.Showtime.ID == "fixture-0" {
+		t.Fatalf("expected the changed initial winner to be replaced: %#v", result.Winner)
+	}
+	if !result.Coverage.WinnerVerified {
+		t.Fatal("expected the promoted winner to pass final verification")
+	}
+	if !strings.Contains(strings.Join(result.Warnings, " "), "promoted") {
+		t.Fatalf("expected promotion to be explained, got %v", result.Warnings)
+	}
+}
+
+type diagnosticInventory struct {
+	base testfixtures.Provider
+}
+
+type promotionInventory struct {
+	base testfixtures.Provider
+}
+
+func (promotionInventory) Name() string { return "promotion-inventory" }
+
+func (promotionInventory) Supports(domain.Showtime) bool { return true }
+
+func (provider promotionInventory) GetAvailability(ctx context.Context, showtime domain.Showtime, final bool) (domain.Inventory, error) {
+	inventory, err := provider.base.GetAvailability(ctx, showtime, final)
+	if err == nil && final && showtime.ID == "fixture-0" {
+		for index := range inventory.Seats {
+			inventory.Seats[index].Status = "sold"
+		}
+	}
+	return inventory, err
+}
+
+func (diagnosticInventory) Name() string { return "diagnostic-inventory" }
+
+func (diagnosticInventory) Supports(domain.Showtime) bool { return true }
+
+func (diagnosticInventory) MaxConcurrentInventoryReads() int { return 2 }
+
+func (provider diagnosticInventory) GetAvailability(ctx context.Context, showtime domain.Showtime, final bool) (domain.Inventory, error) {
+	if !final {
+		switch showtime.ID {
+		case "fixture-0":
+			return domain.Inventory{}, errors.New("Fandango read returned HTTP 429")
+		case "fixture-1":
+			inventory, err := provider.base.GetAvailability(ctx, showtime, false)
+			for index := range inventory.Seats {
+				inventory.Seats[index].Status = "sold"
+			}
+			return inventory, err
+		case "fixture-2":
+			inventory, err := provider.base.GetAvailability(ctx, showtime, false)
+			price := 75.0
+			inventory.TicketPrice = &price
+			return inventory, err
+		}
+	}
+	return provider.base.GetAvailability(ctx, showtime, final)
 }
 
 type unsupportedInventoryForTest struct{}

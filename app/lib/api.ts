@@ -24,6 +24,7 @@ export type QueryState = {
   maxDistance: number;
   maxPrice: number;
   limitPrice: boolean;
+  candidateLimit: number;
   recliners: boolean;
   captions: string;
   audioDescription: boolean;
@@ -90,6 +91,11 @@ export type SeatQueryResponse = {
     screenings_pruned: number;
     inventories_checked: number;
     inventories_fresh: number;
+    inventories_failed: number;
+    screenings_unavailable: number;
+    screenings_price_rejected: number;
+    inventory_failure_reasons: Record<string, number>;
+    winner_verified: boolean;
     providers_degraded: number;
     elapsed_ms: number;
   };
@@ -152,6 +158,7 @@ export function createDefaultQuery(): QueryState {
     maxDistance: 25,
     maxPrice: 60,
     limitPrice: false,
+    candidateLimit: 12,
     recliners: false,
     captions: "any",
     audioDescription: false,
