@@ -132,6 +132,17 @@ export type MovieSuggestion = {
   year?: string;
 };
 
+export type TrendingMovie = {
+  id: string;
+  title: string;
+  poster_url: string;
+  rt_url: string;
+  release_text: string;
+  critics_score?: number;
+  audience_score?: number;
+  certified_fresh?: boolean;
+};
+
 const localDate = (date: Date) => {
   const year = date.getFullYear();
   const month = `${date.getMonth() + 1}`.padStart(2, "0");
