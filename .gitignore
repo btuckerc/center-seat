@@ -21,6 +21,22 @@
 # misc
 .DS_Store
 *.pem
+*.key
+*.p12
+*.pfx
+*.crt
+*.cer
+*.har
+*.sqlite
+*.sqlite3
+*.db
+*.db-*
+*.pid
+.idea/
+.vscode/
+/.cache/
+/data/
+/tmp/
 
 # debug
 npm-debug.log*

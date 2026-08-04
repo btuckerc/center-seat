@@ -1,9 +1,15 @@
 .git
 .next
 .wrangler
+coverage
 dist
 node_modules
 work
 outputs
 *.log
 .env
+.env.*
+!.env.example
+*.har
+*.sqlite*
+*.db*
