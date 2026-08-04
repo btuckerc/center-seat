@@ -1,119 +1,58 @@
 # Architecture
 
-CenterSeat is one service with strict module boundaries, not a fleet of
-microservices. That keeps the query path easy to reason about while the
-provider adapters and stores scale independently.
+CenterSeat has two application services:
+
+- a web app for search and seat-map display;
+- a Go API for discovery, inventory reads, filtering, and ranking.
+
+PostgreSQL and Redis run beside them in Docker Compose. Provider adapters sit
+behind one normalized API.
+
+## Query path
 
 ```text
-Client
-  ├─ GET /v1/movie-suggestions ── canonical provider title matching
-  ├─ POST /v1/showtime-queries ── real discovery without seat claims
-  │ POST /v1/seat-queries ─────── exact-seat query when inventory is connected
-  │ GET /v1/seat-queries/{id}/recommendations/{rank}
-  │                              lazy live map for one selected alternative
-  ▼
-HTTP contract ── idempotency / validation / request ID / ETag
-  ▼
-Query service
-  ├── cached discovery adapter ── configured showtime source
-  ├── constraint planner ──────── local filtering and candidate scoring
-  ├── adaptive fan-out ────────── date-stratified parallel live checks
-  ├── proof bound ─────────────── stop only when unchecked screens cannot win
-  ├── geometry ranker ─────────── preferred zones + contiguous blocks
-  └── final verifier ──────────── one uncached read-only availability check
-  ▼
-Winner + alternatives + score explanation + freshness + booking URL
+search request
+  -> provider showtimes
+  -> local constraint filtering
+  -> parallel seat-map reads
+  -> contiguous-seat ranking
+  -> final availability check
+  -> winner and alternatives
 ```
 
-## Latency budget
+The service spreads its first inventory checks across the requested dates. It
+continues while an unchecked screening can still beat the current winner. A
+result is marked partial when a competitive screening could not be checked.
 
-| Stage | Target | Failure behavior |
-| --- | ---: | --- |
-| Request normalization | 5 ms | Return a 422 problem detail |
-| Cached discovery | 50 ms p95 | Fall back to a secondary licensed feed |
-| Candidate pruning | 10 ms p95 | Deterministic, local operation |
-| Live seat read | 5 s per candidate | Retry transient transport failures; expand to another batch when needed |
-| Ranking | 20 ms p95 | Exclude unrankable low-confidence maps |
-| Winner verification | 5 s hard timeout | Mark result partial; never create a hold |
-| End to end | 3–4 s typical; 45 s web ceiling | API response writes remain open for 60 s so the web layer owns the client deadline |
+Alternatives are returned without full maps. Opening one refreshes only that
+screening.
 
-## Cache policy
+## Ranking
 
-| Record | Freshness |
-| --- | --- |
-| Venue identity | 7–30 days |
-| Movie metadata | 12–24 hours |
-| Showtimes beyond 48 hours | 15–60 minutes |
-| Showtimes within 48 hours | 5–10 minutes |
-| Auditorium layouts | 1–30 days, keyed by payload hash |
-| Live availability | 0–8 seconds |
+The ranker uses provider coordinates when available. It scores complete party
+blocks, not individual seats, and supports:
 
-Redis is the intended hot cache and concurrency-control surface. PostgreSQL
-preserves the normalized schema for provider observations and reproducible query
-results. The current read path keeps short-lived request state in-process; the
-container definitions provision the durable services for the next persistence
-step. Production startup never selects fixture data implicitly.
+- balanced;
+- dead center;
+- two-thirds back;
+- aisle, front, or back;
+- a normalized custom area.
 
-## Reliability rules
+If no seat exists in a preferred area, the response labels the nearest fallback.
+The final check reads inventory again and promotes the next result if needed.
 
-- Per-provider deadlines and concurrency limits protect the query path.
-- The local Fandango scheduler mirrors the observed browser read pattern while
-  remaining more conservative: live reads start 50 ms apart with at most eight
-  in flight. Retry backoff still handles transient 5xx and throttling responses.
-- Identical live-map reads already in progress are coalesced, so overlapping
-  searches share one upstream request without extending inventory freshness.
-- Live checks start with a four-screening proof pass spread across represented
-  local dates. If more coverage is needed, a bounded work-conserving pipeline
-  immediately replaces each completed read while continuously reevaluating the
-  proof bound. This is an internal decision, not a user setting.
-- Early stopping is proof-based, not threshold-based. A screening's theoretical
-  maximum is computed before its live map is read. The service stops only after
-  every date has sufficient coverage and the current winner is at least as good
-  as every unchecked or failed screening's maximum. Otherwise it continues to
-  the automatic safety ceiling and returns an explicit partial result.
-- Inventory failures degrade individual candidates, not the whole search.
-- A successfully loaded map with no eligible block or an excessive live price
-  is counted as a normal exclusion, not mislabeled as an upstream failure.
-- A provider response that explicitly says a screening is gone or unavailable
-  is also a conclusive exclusion; transport, throttling, and malformed-layout
-  errors remain degraded checks that can prevent a best-across-range claim.
-- A failed live check can be safely ignored only when its theoretical maximum
-  cannot beat the verified winner. Any unresolved competitive screening keeps
-  `range_best_proven` false and produces a normalized partial response without
-  leaking provider payloads or request details.
-- Idempotency keys bind to canonical request hashes; key reuse with another body
-  returns a conflict.
-- `GET` results use strong ETags and short private cache headers.
-- Provider responses are normalized before transport handlers see them.
-- Geometry confidence is part of ranking and the public explanation.
-- Dead-center and two-thirds-back profiles use explicit preferred depth bands.
-  The ranker searches inside the band whenever an eligible option exists and
-  marks a global choice as `closest_fallback` when the band is exhausted.
-- Custom profiles use normalized left-to-right and screen-to-back bounds. The
-  same drawn area therefore maps onto any provider auditorium geometry; the
-  full contiguous party block must fit inside it before the ranker falls back
-  to the nearest eligible block outside the area.
-- A single-ticket dead-center query exposes a four-position ideal zone and all
-  currently available equivalent choices; unavailable positions remain visible
-  rather than shifting the geometric target.
-- Initial responses keep alternative maps compact. Opening an alternative
-  refreshes only that screening, limiting upstream fan-out while making results
-  explorable.
-- The final check is read-only. Query traffic never manipulates market
-  availability by holding seats.
-- If the leading screening loses its eligible block during final verification,
-  it is removed and the next ranked candidate is verified before promotion.
-- The personal Fandango adapter is rejected outside local/development mode and
-  has no code path for token, reservation, cart, wallet, payment, or purchase
-  operations.
-- JSON logs, health checks, readiness checks, and Prometheus metrics are built
-  into the service surface.
+## Boundaries
 
-## Scale path
+- Provider calls have timeouts, retries, and concurrency limits.
+- Unknown seat states are unavailable.
+- Inventory failures affect one screening instead of failing the whole search.
+- Identical in-flight seat-map requests are shared.
+- Query traffic never creates a hold or reservation.
+- Provider credentials stay in the API environment.
 
-The stateless API can be replicated behind a load balancer. Shared idempotency,
-query results, and rate-limit leases move to Redis/PostgreSQL when production
-providers are enabled. Candidate fan-out is bounded per provider and per tenant,
-so horizontal scale does not become an uncontrolled upstream request
-multiplier. The normalized schema allows scheduled discovery ingestion to run
-separately without changing the query contract.
+## Deployment
+
+The Mac mini runs the Compose stack. Only the web service is bound to loopback;
+Cloudflare Tunnel publishes it at [movies.angl.gg](https://movies.angl.gg).
+
+See [deploy/macmini/README.md](../deploy/macmini/README.md) for commands.

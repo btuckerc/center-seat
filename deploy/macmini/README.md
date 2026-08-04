@@ -1,23 +1,33 @@
 # Mac mini deployment
 
-The Mac mini runs the regular project Compose file with
-`deploy/macmini/compose.override.yaml` layered on top.
-
-- The web service is available only on Mac-mini loopback port `13000`.
-- The API, PostgreSQL, and Redis services are private to the Compose network.
-- Every service restarts automatically after Docker or the host restarts.
-- `movies.angl.gg` is routed through the Mac mini's existing Cloudflare Tunnel.
-- The public hostname is intentionally not protected by a Cloudflare Access email policy.
-
-Deploy from this directory with:
+The active checkout is `/Users/admin/src/centerseat`. Production uses the base
+Compose file plus `deploy/macmini/compose.override.yaml`.
 
 ```sh
-docker compose -f compose.yaml -f deploy/macmini/compose.override.yaml up -d --build
+cd /Users/admin/src/centerseat
+git pull --ff-only
+docker compose -p centerseat \
+  -f compose.yaml \
+  -f deploy/macmini/compose.override.yaml \
+  up -d --build
 ```
 
-Verify the local origin and public route with:
+The override:
+
+- binds the web app to `127.0.0.1:13000`;
+- keeps the API, PostgreSQL, and Redis off host ports;
+- restarts services after Docker or host restarts;
+- adds a web health check.
+
+Cloudflare Tunnel routes `movies.angl.gg` to the loopback web port.
+
+## Verify
 
 ```sh
-curl --fail --silent --show-error http://127.0.0.1:13000/api/providers
-curl --fail --silent --show-error https://movies.angl.gg/api/providers
+docker compose -p centerseat \
+  -f compose.yaml \
+  -f deploy/macmini/compose.override.yaml \
+  ps
+curl --fail http://127.0.0.1:13000/api/providers
+curl --fail https://movies.angl.gg/api/providers
 ```

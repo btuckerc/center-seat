@@ -1,6 +1,7 @@
 {
   "name": "centerseat-web",
   "version": "0.1.0",
+  "description": "Find the best available movie-theater seat across nearby showtimes.",
   "private": true,
   "engines": {
     "node": ">=22.13.0"

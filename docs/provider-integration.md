@@ -1,108 +1,54 @@
 # Provider integration
 
-CenterSeat models discovery and seat inventory as separate capabilities even
-when one platform supplies both. The default discovery adapter now uses Open
-Cinema; Atom remains an optional full-inventory adapter.
+Discovery and seat inventory are separate capabilities. A provider may support
+one or both.
 
-## Implemented Open Cinema path
+## Current adapters
 
-Open Cinema issues self-service API keys and provides live indie, repertory, and
-arthouse screenings with provider checkout links. CenterSeat authenticates
-server-side, performs one title-and-location query with cursor pagination,
-normalizes formats and accessibility fields, filters the complete requested date
-range in theater-local time, and rejects unsafe or placeholder checkout URLs.
+### Open Cinema
 
-Open Cinema does not expose auditorium layouts or live seat states. Its
-showtimes therefore have no inventory provider, never enter the exact-seat
-ranking path, and are returned through the discovery-only endpoint with an
-explicit warning. `OPEN_CINEMA_API_KEY` is required and
-`OPEN_CINEMA_API_BASE_URL` defaults to `https://opencinema.app`.
+Open Cinema supplies self-service showtimes and checkout links for independent
+cinemas. It does not supply seat maps. Set `OPEN_CINEMA_API_KEY` and use
+`CENTERSEAT_PROVIDER_MODE=opencinema`.
 
-## Optional Atom path
+### Atom
 
-The adapter authenticates with Atom's server-side `x-api-key`, looks up nearby
-supported venues, batches multi-venue showtime discovery in Atom's seven-day
-windows, and calls the read-only auditorium discovery endpoint for current seat
-status. It repeats the winning map read before returning the recommendation and
-never calls the lease endpoint. Unknown seat states fail closed as blocked.
+Atom supplies showtimes and seat inventory with approved partner access. Set
+`ATOM_API_KEY` and use `CENTERSEAT_PROVIDER_MODE=atom`. The adapter reads
+availability twice for the winner and never calls the seat-lease endpoint.
 
-`ATOM_API_KEY` is required. `ATOM_API_BASE_URL` defaults to Atom production, and
-`ATOM_PARTNER_ID` is optional unless assigned during onboarding. Atom's venue
-API requires latitude/longitude and limits radius to 80 km. Checkout links are
-used only when Atom supplies a valid HTTPS `atomtickets.com` URL.
+### Fandango local
 
-## Personal local Fandango path
+The local adapter resolves titles, fetches showtimes for each requested date,
+and reads a bounded set of anonymous seat maps. It is restricted to `local` or
+`development`, sends no account state, and contains no checkout code.
 
-`CENTERSEAT_PROVIDER_MODE=fandango-local` is an opt-in full-inventory adapter
-that is accepted only with `CENTERSEAT_ENV=local` or `development`. It
-resolves a title through Fandango's anonymous autocomplete response, queries
-showtime groupings for every requested date, filters candidates locally, then
-reads only the bounded set of required seat maps. Exact provider coordinates,
-neighbor IDs, seat types, ticket price/fee hints, and observed availability
-states feed the existing ranker.
+See [fandango-research.md](fandango-research.md).
 
-The adapter also exposes normalized autocomplete suggestions so the client can
-send a selected canonical movie ID and avoid ambiguous title resolution. Free
-text remains valid. A five-digit US ZIP is accepted as a coarse location signal,
-so this path does not require browser geolocation; coordinates can still be used
-when the user explicitly chooses current location. Other providers continue to
-declare whether they require coordinates.
+## Adapter contract
 
-The adapter has a hardcoded GET path allowlist, rejects redirects, sends no
-cookie or account state, limits request concurrency, spaces request starts, and
-refreshes the winning map without creating a hold. It contains no checkout,
-token, reservation, cart, wallet, payment, or purchase implementation. Current
-Fandango terms and robots restrictions make this a personal local integration,
-not a hosted production dependency. See `docs/fandango-research.md`.
+A discovery adapter returns normalized movies, venues, showtimes, formats,
+accessibility details, price hints, provider IDs, and booking links.
 
-## Discovery adapter
+An inventory adapter returns:
 
-An adapter must return normalized movies, venues, showtimes, presentation
-formats, accessibility attributes, price hints, provider IDs, and booking links.
-The ingestion layer should preserve the raw payload hash and observation window
-so changes are auditable.
+- row and seat labels;
+- coordinates;
+- seat type and availability;
+- auditorium geometry when available;
+- observation time;
+- a provider booking link when permitted.
 
-Required production behavior:
+Unknown or incomplete inventory must fail closed. Keep volatile availability
+separate from the more stable auditorium layout.
 
-- Conditional requests (`ETag`, `If-Modified-Since`, or provider cursor)
-- Provider-specific retry classification with jitter
-- Explicit rate-limit accounting
-- Stable external-ID mapping for movies and venues
-- Timezone-aware local showtimes
-- Licensed commercial usage and a support contact
+## Adding a provider
 
-## Inventory adapter
+1. Implement the adapter under `backend/internal/providers/`.
+2. Normalize provider values into `backend/internal/domain` types.
+3. Add fixtures for every observed seat state and layout variant.
+4. Add configuration validation and startup checks.
+5. Test retries, time zones, pagination, price handling, and final verification.
+6. Update `.env.example` and `openapi/v1.yaml` if the public contract changes.
 
-An adapter must report a layout and a live availability observation. Static
-layout data and volatile availability should be fetched and cached separately.
-
-Required fields:
-
-- Row and seat labels
-- Real coordinates when available
-- Seat type (standard, recliner, wheelchair, companion, sofa)
-- State (available, sold, held, broken, house)
-- Auditorium and screen boundary when supplied
-- Observation time and permitted cache lifetime
-- Direct booking link when the provider supplies or contractually defines one
-
-Adapters declare a confidence grade: `exact_coordinates`,
-`rendered_geometry`, `row_geometry`, `label_heuristic`, or `visual_inference`.
-The query can enforce a minimum grade.
-
-## Launch sequence
-
-1. Contract and commercial review with one discovery vendor.
-2. Shadow-ingest one market and compare coverage with theater sites.
-3. Add one authorized inventory platform or exhibitor.
-4. Run synthetic searches against fixed showtimes and compare map snapshots.
-5. Enable a small geography with provider budgets and dashboards.
-6. Expand by ticketing platform, not one theater UI at a time.
-
-Do not use an order or seat hold as an availability probe. Do not make
-unauthorized scraping a required production dependency. Purchase support should
-be a separate, explicit workflow with new threat modeling, confirmation,
-payment, and cleanup semantics.
-
-The opt-in local Fandango adapter notes and local HAR-analysis procedure live in
-`docs/fandango-research.md`. Captures are never replayed by the analyzer.
+Do not use a hold, cart, or order as an availability probe.
