@@ -2,10 +2,20 @@ package main
 
 import (
 	"context"
+	"net/http"
 	"testing"
+	"time"
 
 	"centerseat/backend/internal/domain"
 )
+
+func TestHTTPServerAllowsLiveQueriesToFinishBeforeWebDeadline(t *testing.T) {
+	server := newHTTPServer(":0", http.NotFoundHandler())
+	const webDeadline = 45 * time.Second
+	if server.WriteTimeout <= webDeadline {
+		t.Fatalf("API write timeout %s must exceed web deadline %s", server.WriteTimeout, webDeadline)
+	}
+}
 
 type healthCheckedProvider struct {
 	name string

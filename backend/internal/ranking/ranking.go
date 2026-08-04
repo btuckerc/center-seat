@@ -14,6 +14,27 @@ type Targets struct {
 	Aisle bool
 }
 
+type profilePolicy struct {
+	target            Targets
+	horizontalWeight  float64
+	depthWeight       float64
+	aisleWeight       float64
+	orphanWeight      float64
+	confidenceWeight  float64
+	preferredDepth    domain.DepthRange
+	hasPreferredDepth bool
+	preferredZone     *domain.SeatZone
+}
+
+type rankedBlock struct {
+	seats       []domain.Seat
+	cost        float64
+	parts       map[string]float64
+	midX        float64
+	midY        float64
+	inPreferred bool
+}
+
 func profileTargets(profile string) Targets {
 	switch profile {
 	case "dead_center":
@@ -29,6 +50,71 @@ func profileTargets(profile string) Targets {
 	default:
 		return Targets{X: .50, Y: .60}
 	}
+}
+
+func policyForQuery(q domain.QueryRequest) profilePolicy {
+	profile := q.SeatProfile
+	policy := profilePolicy{
+		target: profileTargets(profile), horizontalWeight: .48, depthWeight: .32,
+		aisleWeight: .08, orphanWeight: .06, confidenceWeight: .06,
+	}
+	switch profile {
+	case "dead_center":
+		policy.horizontalWeight = .44
+		policy.depthWeight = .44
+		policy.aisleWeight = .04
+		policy.orphanWeight = .04
+		policy.confidenceWeight = .04
+		policy.preferredDepth = domain.DepthRange{Minimum: .38, Maximum: .62}
+		policy.hasPreferredDepth = true
+	case "two_thirds_back":
+		policy.horizontalWeight = .40
+		policy.depthWeight = .48
+		policy.aisleWeight = .04
+		policy.orphanWeight = .04
+		policy.confidenceWeight = .04
+		policy.preferredDepth = domain.DepthRange{Minimum: .50, Maximum: .78}
+		policy.hasPreferredDepth = true
+	case "custom":
+		if q.CustomSeatZone != nil {
+			zone := *q.CustomSeatZone
+			policy.preferredZone = &zone
+			policy.target = Targets{X: (zone.MinimumX + zone.MaximumX) / 2, Y: (zone.MinimumY + zone.MaximumY) / 2}
+			policy.horizontalWeight = .45
+			policy.depthWeight = .45
+			policy.aisleWeight = .02
+			policy.orphanWeight = .04
+			policy.confidenceWeight = .04
+		}
+	}
+	return policy
+}
+
+func (policy profilePolicy) hasPreferredArea() bool {
+	return policy.hasPreferredDepth || policy.preferredZone != nil
+}
+
+func (policy profilePolicy) blockInPreferredArea(block []domain.Seat) bool {
+	if len(block) == 0 {
+		return false
+	}
+	if policy.hasPreferredDepth && (block[0].Y < policy.preferredDepth.Minimum || block[0].Y > policy.preferredDepth.Maximum) {
+		return false
+	}
+	if policy.preferredZone == nil {
+		return true
+	}
+	minimumX, maximumX := block[0].X, block[0].X
+	for _, seat := range block[1:] {
+		minimumX = math.Min(minimumX, seat.X)
+		maximumX = math.Max(maximumX, seat.X)
+	}
+	zone := policy.preferredZone
+	return minimumX >= zone.MinimumX && maximumX <= zone.MaximumX && block[0].Y >= zone.MinimumY && block[0].Y <= zone.MaximumY
+}
+
+func (policy profilePolicy) seatInPreferredArea(seat domain.Seat) bool {
+	return policy.blockInPreferredArea([]domain.Seat{seat})
 }
 
 func confidencePenalty(confidence string) float64 {
@@ -74,10 +160,9 @@ func BestBlock(showtime domain.Showtime, inventory domain.Inventory, q domain.Qu
 			rows[seat.Row] = append(rows[seat.Row], seat)
 		}
 	}
-	target := profileTargets(q.SeatProfile)
-	bestCost := math.MaxFloat64
-	var best []domain.Seat
-	bestParts := map[string]float64{}
+	policy := policyForQuery(q)
+	target := policy.target
+	candidates := make([]rankedBlock, 0)
 
 	for _, rowSeats := range rows {
 		sort.Slice(rowSeats, func(i, j int) bool { return rowSeats[i].Index < rowSeats[j].Index })
@@ -109,92 +194,186 @@ func BestBlock(showtime domain.Showtime, inventory domain.Inventory, q domain.Qu
 				orphan = .08
 			}
 			confidence := confidencePenalty(inventory.Confidence)
-			cost := .48*horizontal + .32*depth + .08*aisle + .06*orphan + .06*confidence
-			if cost < bestCost {
-				bestCost = cost
-				best = append([]domain.Seat(nil), block...)
-				bestParts = map[string]float64{
+			cost := policy.horizontalWeight*horizontal + policy.depthWeight*depth + policy.aisleWeight*aisle + policy.orphanWeight*orphan + policy.confidenceWeight*confidence
+			inPreferred := policy.blockInPreferredArea(block)
+			candidates = append(candidates, rankedBlock{
+				seats: append([]domain.Seat(nil), block...), cost: cost, midX: midX, midY: midY, inPreferred: inPreferred,
+				parts: map[string]float64{
 					"horizontal_alignment": round2(100 * (1 - horizontal)),
 					"viewing_depth":        round2(100 * (1 - depth)),
 					"party_contiguity":     100,
 					"geometry_confidence":  round2(100 * (1 - confidence)),
-				}
-			}
+				},
+			})
 		}
 	}
-	if len(best) == 0 {
+	if len(candidates) == 0 {
 		return domain.Recommendation{}, false
 	}
-	score := math.Max(0, math.Min(100, 100*(1-bestCost)))
+	pool := candidates
+	fallback := false
+	if policy.hasPreferredArea() {
+		preferred := make([]rankedBlock, 0, len(candidates))
+		for _, candidate := range candidates {
+			if candidate.inPreferred {
+				preferred = append(preferred, candidate)
+			}
+		}
+		if len(preferred) > 0 {
+			pool = preferred
+		} else {
+			fallback = true
+		}
+	}
+	sort.SliceStable(pool, func(i, j int) bool {
+		if math.Abs(pool[i].cost-pool[j].cost) > 1e-9 {
+			return pool[i].cost < pool[j].cost
+		}
+		if math.Abs(pool[i].midY-target.Y) != math.Abs(pool[j].midY-target.Y) {
+			return math.Abs(pool[i].midY-target.Y) < math.Abs(pool[j].midY-target.Y)
+		}
+		if math.Abs(pool[i].midX-target.X) != math.Abs(pool[j].midX-target.X) {
+			return math.Abs(pool[i].midX-target.X) < math.Abs(pool[j].midX-target.X)
+		}
+		return pool[i].seats[0].ID < pool[j].seats[0].ID
+	})
+	bestCandidate := pool[0]
+	best := bestCandidate.seats
+	bestCandidate.parts["preferred_zone"] = 100
+	if fallback {
+		bestCandidate.parts["preferred_zone"] = 0
+	}
+	score := math.Max(0, math.Min(100, 100*(1-bestCandidate.cost)))
 	labels := best[0].Label
 	if len(best) > 1 {
 		labels = best[0].Label + "–" + best[len(best)-1].Label
 	}
+	lead := fmt.Sprintf("%s is the strongest contiguous block for the %s profile", labels, humanProfile(q.SeatProfile))
+	profileMatch := "preferred_zone"
+	if policy.hasPreferredArea() && fallback {
+		lead = fmt.Sprintf("%s is the closest available fallback; no eligible seat remained in the preferred %s zone", labels, humanProfile(q.SeatProfile))
+		profileMatch = "closest_fallback"
+	} else if policy.hasPreferredArea() {
+		lead = fmt.Sprintf("%s is the strongest available choice in the preferred %s zone", labels, humanProfile(q.SeatProfile))
+	}
 	explanation := []string{
-		fmt.Sprintf("%s is the strongest contiguous block for the %s profile", labels, humanProfile(q.SeatProfile)),
+		lead,
 		fmt.Sprintf("Block center is x %.1f%% against a %.1f%% horizontal target", ((best[0].X+best[len(best)-1].X)/2)*100, target.X*100),
 		fmt.Sprintf("Row %s is %.0f%% of the way from the screen", best[0].Row, best[0].Y*100),
 		"Live availability was refreshed before this recommendation was returned",
 	}
-	seatOptions, recommendedZone := centerSeatOptions(inventory.Seats, q, target, best, excludedRows)
+	seatOptions, recommendedZone := profileSeatChoices(inventory.Seats, q, policy, pool, excludedRows)
 	if q.TicketCount == 1 && q.SeatProfile == "dead_center" && len(recommendedZone) > 1 {
-		unavailable := len(recommendedZone) - len(seatOptions)
-		if len(seatOptions) == 0 {
-			seatOptions = append([]domain.Seat(nil), best...)
-			explanation[0] = fmt.Sprintf("%s is the closest available seat; all %d geometric center-zone positions are unavailable", joinSeatLabels(seatOptions), len(recommendedZone))
-		} else if len(seatOptions) == 1 {
+		idealOptions := availableZoneSeats(inventory.Seats, recommendedZone, q)
+		unavailable := len(recommendedZone) - len(idealOptions)
+		if len(idealOptions) == 0 {
+			profileMatch = "closest_fallback"
+			bestCandidate.parts["preferred_zone"] = 0
+			verb, noun := "is", "fallback"
+			if len(seatOptions) > 1 {
+				verb, noun = "are", "fallbacks"
+			}
+			explanation[0] = fmt.Sprintf("%s %s the closest available %s; all %d geometric center positions are unavailable", joinSeatLabels(seatOptions), verb, noun, len(recommendedZone))
+		} else if len(idealOptions) == 1 {
+			seatOptions = idealOptions
 			explanation[0] = fmt.Sprintf("%s is the best available choice in the %d-seat geometric center zone", joinSeatLabels(seatOptions), len(recommendedZone))
 		} else {
+			seatOptions = idealOptions
 			explanation[0] = fmt.Sprintf("%s are the best available choices in the %d-seat geometric center zone", joinSeatLabels(seatOptions), len(recommendedZone))
 		}
 		if unavailable > 0 {
 			explanation = append(explanation[:1], append([]string{fmt.Sprintf("%d ideal-zone %s currently unavailable", unavailable, pluralizeSeat(unavailable))}, explanation[1:]...)...)
 		}
 	}
+	var preferredDepth *domain.DepthRange
+	if policy.hasPreferredDepth {
+		depth := policy.preferredDepth
+		preferredDepth = &depth
+	}
+	var preferredZone *domain.SeatZone
+	if policy.preferredZone != nil {
+		zone := *policy.preferredZone
+		preferredZone = &zone
+	}
 	return domain.Recommendation{
 		Showtime: showtime, Seats: best, SeatOptions: seatOptions, Score: round2(score), Confidence: inventory.Confidence,
-		Explanation: explanation, ScoreBreakdown: bestParts, VerifiedAt: inventory.ObservedAt, BookingURL: showtime.BookingURL,
+		Explanation: explanation, ScoreBreakdown: bestCandidate.parts, ProfileMatch: profileMatch, VerifiedAt: inventory.ObservedAt, BookingURL: showtime.BookingURL,
 		SeatMap: &domain.SeatMap{
-			Seats: inventory.Seats, Target: domain.GeometryPoint{X: target.X, Y: target.Y}, RecommendedZone: recommendedZone,
+			Seats: inventory.Seats, Target: domain.GeometryPoint{X: target.X, Y: target.Y}, PreferredDepth: preferredDepth, PreferredZone: preferredZone, RecommendedZone: recommendedZone,
 			Confidence: inventory.Confidence, ObservedAt: inventory.ObservedAt,
 		},
 	}, true
 }
 
-func centerSeatOptions(seats []domain.Seat, q domain.QueryRequest, target Targets, best []domain.Seat, excludedRows map[string]bool) ([]domain.Seat, []string) {
-	if len(best) == 0 {
+func availableZoneSeats(seats []domain.Seat, zone []string, q domain.QueryRequest) []domain.Seat {
+	byID := make(map[string]domain.Seat, len(seats))
+	for _, seat := range seats {
+		byID[seat.ID] = seat
+	}
+	available := make([]domain.Seat, 0, len(zone))
+	for _, id := range zone {
+		if seat, ok := byID[id]; ok && eligible(seat, q) {
+			available = append(available, seat)
+		}
+	}
+	return available
+}
+
+func profileSeatChoices(seats []domain.Seat, q domain.QueryRequest, policy profilePolicy, ranked []rankedBlock, excludedRows map[string]bool) ([]domain.Seat, []string) {
+	if len(ranked) == 0 {
 		return nil, nil
 	}
-	if q.TicketCount != 1 || q.SeatProfile != "dead_center" {
+	best := ranked[0].seats
+	if q.TicketCount != 1 {
 		ids := make([]string, 0, len(best))
 		for _, seat := range best {
 			ids = append(ids, seat.ID)
 		}
 		return append([]domain.Seat(nil), best...), ids
 	}
-	candidates := make([]domain.Seat, 0)
+	physical := make([]domain.Seat, 0)
 	for _, seat := range seats {
-		if seat.Row == best[0].Row && !excludedRows[seat.Row] && eligibleType(seat, q) {
-			candidates = append(candidates, seat)
+		if excludedRows[seat.Row] || !eligibleType(seat, q) {
+			continue
+		}
+		if policy.hasPreferredArea() && !policy.seatInPreferredArea(seat) {
+			continue
+		}
+		physical = append(physical, seat)
+	}
+	if len(physical) == 0 {
+		for _, seat := range seats {
+			if !excludedRows[seat.Row] && eligibleType(seat, q) {
+				physical = append(physical, seat)
+			}
 		}
 	}
-	sort.SliceStable(candidates, func(i, j int) bool {
-		left := math.Abs(candidates[i].X - target.X)
-		right := math.Abs(candidates[j].X - target.X)
-		if left == right {
-			return candidates[i].Index < candidates[j].Index
+	sort.SliceStable(physical, func(i, j int) bool {
+		left := policy.horizontalWeight*math.Abs(physical[i].X-policy.target.X) + policy.depthWeight*math.Abs(physical[i].Y-policy.target.Y)
+		right := policy.horizontalWeight*math.Abs(physical[j].X-policy.target.X) + policy.depthWeight*math.Abs(physical[j].Y-policy.target.Y)
+		if math.Abs(left-right) > 1e-9 {
+			return left < right
 		}
-		return left < right
+		return physical[i].ID < physical[j].ID
 	})
-	if len(candidates) > 4 {
-		candidates = candidates[:4]
+	if len(physical) > 4 {
+		physical = physical[:4]
 	}
-	zone := make([]string, 0, len(candidates))
-	options := make([]domain.Seat, 0, len(candidates))
-	for _, seat := range candidates {
+	zone := make([]string, 0, len(physical))
+	for _, seat := range physical {
 		zone = append(zone, seat.ID)
-		if seat.Status == "available" {
-			options = append(options, seat)
+	}
+	options := make([]domain.Seat, 0, 4)
+	seen := map[string]bool{}
+	for _, candidate := range ranked {
+		seat := candidate.seats[0]
+		if candidate.cost-ranked[0].cost > .06 || seen[seat.ID] {
+			continue
+		}
+		seen[seat.ID] = true
+		options = append(options, seat)
+		if len(options) == 4 {
+			break
 		}
 	}
 	return options, zone
@@ -274,7 +453,7 @@ func firstRows(seats []domain.Seat, count int) map[string]bool {
 func humanProfile(profile string) string {
 	return map[string]string{
 		"balanced": "best overall", "dead_center": "dead-center", "two_thirds_back": "two-thirds-back",
-		"aisle": "aisle-friendly", "front": "closer-to-screen", "back": "back-row",
+		"aisle": "aisle-friendly", "front": "closer-to-screen", "back": "back-row", "custom": "custom",
 	}[profile]
 }
 

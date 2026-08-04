@@ -1,9 +1,10 @@
 "use client";
 
-import { FormEvent, useEffect, useId, useRef, useState } from "react";
+import { FormEvent, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, useEffect, useId, useRef, useState } from "react";
 import {
   createDefaultQuery,
   type MovieSuggestion,
+  type NormalizedSeatZone,
   type ProviderStatus,
   type QueryState,
   type Recommendation,
@@ -31,22 +32,134 @@ const profiles: { value: SeatProfile; label: string; hint: string }[] = [
   { value: "aisle", label: "Near an aisle", hint: "Easy in and out" },
   { value: "front", label: "Closer", hint: "Immersive front section" },
   { value: "back", label: "Back rows", hint: "More distance" },
+  { value: "custom", label: "Custom zone", hint: "Draw a preferred area" },
 ];
 
 type ProviderState = "checking" | "ready" | "discovery" | "unconfigured" | "unavailable";
 type TrendingState = "loading" | "ready" | "unavailable";
 type Problem = { title: string; detail: string; status?: number };
+type SearchExperienceProps = {
+  initialTrending?: TrendingMovie[];
+  initialTrendingSourceURL?: string;
+};
 type SavedPreferences = Pick<QueryState,
-  "location" | "tickets" | "profile" | "formats" | "maxDistance" |
+  "location" | "tickets" | "profile" | "customSeatZone" | "formats" | "maxDistance" |
   "recliners" | "captions" | "audioDescription" | "wheelchairSpaces" | "companionSeats" |
   "excludeFirstRows" | "allowSplit" | "limitPrice" | "maxPrice"
 >;
 
-const preferencesKey = "centerseat.preferences.v1";
+const preferencesKey = "centerseat.preferences.v2";
+const legacyPreferencesKey = "centerseat.preferences.v1";
 const postalCodePattern = /^\s*\d{5}(?:-\d{4})?\s*$/;
 
 function FieldLabel({ children }: { children: React.ReactNode }) {
   return <span className="field-label">{children}</span>;
+}
+
+const defaultCustomZone: NormalizedSeatZone = { minimumX: .28, maximumX: .72, minimumY: .42, maximumY: .76 };
+const clampUnit = (value: number) => Math.max(0, Math.min(1, value));
+const roundCoordinate = (value: number) => Math.round(clampUnit(value) * 1_000) / 1_000;
+
+function CustomSeatZonePicker({ value, onChange }: { value: NormalizedSeatZone; onChange: (zone: NormalizedSeatZone) => void }) {
+  const surface = useRef<HTMLDivElement>(null);
+  const dragOrigin = useRef<{ x: number; y: number } | null>(null);
+
+  const pointFromEvent = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const bounds = surface.current?.getBoundingClientRect();
+    if (!bounds) return null;
+    return {
+      x: clampUnit((event.clientX - bounds.left) / bounds.width),
+      y: clampUnit((event.clientY - bounds.top) / bounds.height),
+    };
+  };
+
+  const zoneFromPoints = (start: { x: number; y: number }, end: { x: number; y: number }): NormalizedSeatZone => {
+    const axis = (first: number, second: number) => {
+      let minimum = Math.min(first, second);
+      let maximum = Math.max(first, second);
+      if (maximum - minimum < .08) {
+        const center = (minimum + maximum) / 2;
+        minimum = Math.max(0, center - .04);
+        maximum = Math.min(1, minimum + .08);
+        minimum = Math.max(0, maximum - .08);
+      }
+      return [roundCoordinate(minimum), roundCoordinate(maximum)] as const;
+    };
+    const [minimumX, maximumX] = axis(start.x, end.x);
+    const [minimumY, maximumY] = axis(start.y, end.y);
+    return { minimumX, maximumX, minimumY, maximumY };
+  };
+
+  const draw = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const point = pointFromEvent(event);
+    if (!point || !dragOrigin.current) return;
+    onChange(zoneFromPoints(dragOrigin.current, point));
+  };
+
+  const moveWithKeyboard = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+    const step = event.shiftKey ? .05 : .025;
+    let deltaX = 0;
+    let deltaY = 0;
+    if (event.key === "ArrowLeft") deltaX = -step;
+    else if (event.key === "ArrowRight") deltaX = step;
+    else if (event.key === "ArrowUp") deltaY = -step;
+    else if (event.key === "ArrowDown") deltaY = step;
+    else return;
+    event.preventDefault();
+    const width = value.maximumX - value.minimumX;
+    const height = value.maximumY - value.minimumY;
+    const minimumX = clampUnit(Math.min(1 - width, value.minimumX + deltaX));
+    const minimumY = clampUnit(Math.min(1 - height, value.minimumY + deltaY));
+    onChange({
+      minimumX: roundCoordinate(minimumX), maximumX: roundCoordinate(minimumX + width),
+      minimumY: roundCoordinate(minimumY), maximumY: roundCoordinate(minimumY + height),
+    });
+  };
+
+  return (
+    <section className="custom-zone-field full-span" aria-labelledby="custom-zone-title">
+      <div className="custom-zone-head">
+        <span><b id="custom-zone-title">Draw your preferred area</b><small>The shape scales to each auditorium.</small></span>
+        <button onClick={() => onChange(defaultCustomZone)} type="button">Reset</button>
+      </div>
+      <div className="custom-zone-screen" aria-hidden="true"><span>SCREEN</span><i /></div>
+      <div
+        aria-label="Custom seat area. Drag to redraw it. Use arrow keys to move it."
+        className="custom-zone-surface"
+        onKeyDown={moveWithKeyboard}
+        onPointerCancel={() => { dragOrigin.current = null; }}
+        onPointerDown={(event) => {
+          const point = pointFromEvent(event);
+          if (!point) return;
+          event.currentTarget.setPointerCapture(event.pointerId);
+          dragOrigin.current = point;
+          onChange(zoneFromPoints(point, point));
+        }}
+        onPointerMove={draw}
+        onPointerUp={(event) => {
+          draw(event);
+          dragOrigin.current = null;
+          if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
+        }}
+        ref={surface}
+        role="group"
+        tabIndex={0}
+      >
+        <span className="custom-zone-depth front" aria-hidden="true">FRONT</span>
+        <span className="custom-zone-depth back" aria-hidden="true">BACK</span>
+        <span
+          className="custom-zone-selection"
+          style={{
+            left: `${value.minimumX * 100}%`,
+            top: `${value.minimumY * 100}%`,
+            width: `${(value.maximumX - value.minimumX) * 100}%`,
+            height: `${(value.maximumY - value.minimumY) * 100}%`,
+          }}
+        ><b>Preferred</b></span>
+      </div>
+      <p>Drag to redraw. Arrow keys move the selected area.</p>
+    </section>
+  );
 }
 
 const showtimeLabels = (recommendation: Recommendation) => ({
@@ -62,23 +175,25 @@ const screeningLabels = (showtime: Showtime) => ({
 const humanize = (value: string) => value.replaceAll("_", " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
 const normalizeTitle = (value: string) => value.toLocaleLowerCase().replace(/[^a-z0-9]+/g, "").trim();
 
-export function SearchExperience() {
+export function SearchExperience({
+  initialTrending = [],
+  initialTrendingSourceURL = "https://www.rottentomatoes.com/browse/movies_in_theaters/sort:popular",
+}: SearchExperienceProps) {
   const [draft, setDraft] = useState<QueryState>(() => createDefaultQuery());
   const [applied, setApplied] = useState<QueryState | null>(null);
   const [result, setResult] = useState<SeatQueryResponse | null>(null);
   const [showtimeResult, setShowtimeResult] = useState<ShowtimeQueryResponse | null>(null);
   const [problem, setProblem] = useState<Problem | null>(null);
   const [providerState, setProviderState] = useState<ProviderState>("checking");
-  const [providerDegraded, setProviderDegraded] = useState(false);
   const [postalLocationSupported, setPostalLocationSupported] = useState(false);
   const [searching, setSearching] = useState(false);
   const [locating, setLocating] = useState(false);
   const [locationProblem, setLocationProblem] = useState("");
   const [queryOpen, setQueryOpen] = useState(false);
   const [infoOpen, setInfoOpen] = useState(false);
-  const [trending, setTrending] = useState<TrendingMovie[]>([]);
-  const [trendingState, setTrendingState] = useState<TrendingState>("loading");
-  const [trendingSourceURL, setTrendingSourceURL] = useState("https://www.rottentomatoes.com/browse/movies_in_theaters/sort:popular");
+  const [trending, setTrending] = useState<TrendingMovie[]>(initialTrending);
+  const [trendingState, setTrendingState] = useState<TrendingState>(initialTrending.length ? "ready" : "loading");
+  const [trendingSourceURL, setTrendingSourceURL] = useState(initialTrendingSourceURL);
   const [movieSuggestions, setMovieSuggestions] = useState<MovieSuggestion[]>([]);
   const [suggestionsOpen, setSuggestionsOpen] = useState(false);
   const [activeSuggestion, setActiveSuggestion] = useState(-1);
@@ -88,19 +203,30 @@ export function SearchExperience() {
   useEffect(() => {
     const timer = window.setTimeout(() => {
       try {
-        const saved = JSON.parse(window.localStorage.getItem(preferencesKey) ?? "null") as Partial<SavedPreferences> | null;
+        const currentPreferences = window.localStorage.getItem(preferencesKey);
+        const saved = JSON.parse(currentPreferences ?? window.localStorage.getItem(legacyPreferencesKey) ?? "null") as Partial<SavedPreferences> | null;
         if (!saved) return;
-        setDraft((current) => ({ ...current, ...saved, movie: "", movieId: undefined, latitude: undefined, longitude: undefined }));
+        setDraft((current) => ({
+          ...current,
+          ...saved,
+          tickets: currentPreferences ? saved.tickets ?? current.tickets : 2,
+          movie: "",
+          movieId: undefined,
+          latitude: undefined,
+          longitude: undefined,
+        }));
       } catch {
         window.localStorage.removeItem(preferencesKey);
+        window.localStorage.removeItem(legacyPreferencesKey);
       }
     }, 0);
     return () => window.clearTimeout(timer);
   }, []);
 
   useEffect(() => {
+    if (initialTrending.length) return;
     let active = true;
-    fetch("/api/trending-movies", { cache: "no-store" })
+    fetch("/api/trending-movies")
       .then(async (response) => response.json() as Promise<{ movies?: TrendingMovie[]; source_url?: string; unavailable?: boolean }>)
       .then((payload) => {
         if (!active) return;
@@ -111,7 +237,7 @@ export function SearchExperience() {
       })
       .catch(() => active && setTrendingState("unavailable"));
     return () => { active = false; };
-  }, []);
+  }, [initialTrending.length]);
 
   useEffect(() => {
     let active = true;
@@ -122,8 +248,6 @@ export function SearchExperience() {
         const statuses = payload.providers ?? [];
         const discoveryConfigured = statuses.some((provider) => provider.kind === "discovery" && provider.configured && provider.status !== "disabled");
         const inventoryConfigured = statuses.some((provider) => provider.kind === "inventory" && provider.configured && provider.status !== "disabled");
-        const configuredStatuses = statuses.filter((provider) => provider.configured && provider.status !== "disabled");
-        setProviderDegraded(configuredStatuses.some((provider) => provider.status !== "healthy"));
         setPostalLocationSupported(statuses.some((provider) => provider.kind === "discovery" && provider.configured && provider.status !== "disabled" && provider.location_mode === "postal_or_coordinates"));
         if (response.ok && discoveryConfigured && inventoryConfigured) setProviderState("ready");
         else if (response.ok && discoveryConfigured) setProviderState("discovery");
@@ -244,6 +368,7 @@ export function SearchExperience() {
       location: hasPostalLocation ? draft.location.trim() : "",
       tickets: draft.tickets,
       profile: draft.profile,
+      customSeatZone: draft.customSeatZone,
       formats: draft.formats,
       maxDistance: draft.maxDistance,
       recliners: draft.recliners,
@@ -281,6 +406,12 @@ export function SearchExperience() {
       time: { mode: draft.timeMode, start: draft.startTime, end: draft.endTime, timezone: Intl.DateTimeFormat().resolvedOptions().timeZone },
       ticket_count: draft.tickets,
       seat_profile: draft.profile,
+      ...(draft.profile === "custom" ? { custom_seat_zone: {
+        minimum_x: draft.customSeatZone.minimumX,
+        maximum_x: draft.customSeatZone.maximumX,
+        minimum_y: draft.customSeatZone.minimumY,
+        maximum_y: draft.customSeatZone.maximumY,
+      } } : {}),
       formats: draft.formats.map((format) => format.toLowerCase()),
       captions: draft.captions,
       audio_description: draft.audioDescription,
@@ -330,9 +461,11 @@ export function SearchExperience() {
     unconfigured: "Source required",
     unavailable: "Source unavailable",
   }[providerState];
-  const effectiveProviderText = providerDegraded && (providerState === "ready" || providerState === "discovery") ? "Live source warming up" : providerText;
   const hasOutcome = Boolean(result || showtimeResult || problem);
   const searchText = searching ? "Checking live seats…" : providerState === "ready" ? "Find my best seat" : providerState === "discovery" ? "Find showtimes" : "Live source required";
+  const showStartTime = draft.timeMode === "inside" || draft.timeMode === "outside" || draft.timeMode === "after";
+  const showEndTime = draft.timeMode === "inside" || draft.timeMode === "outside" || draft.timeMode === "before";
+  const timeRowMode = showStartTime && showEndTime ? "time-window" : showStartTime || showEndTime ? "time-single" : "time-any";
 
   return (
     <main className="app-shell">
@@ -341,20 +474,17 @@ export function SearchExperience() {
           <span className="brand-mark">C</span><span>CENTERSEAT</span>
         </button>
         <div className="topbar-right">
-          <span className={`network-status ${providerState}${providerDegraded ? " degraded" : ""}`}><i />{effectiveProviderText}</span>
           <button className="topbar-action" onClick={() => setInfoOpen(true)} type="button">How it works</button>
-          <button className="topbar-search" onClick={() => openQuery()} type="button">New search <span>⌕</span></button>
+          <button className="topbar-search" onClick={() => openQuery()} type="button">New search <span aria-hidden="true">⌕</span></button>
         </div>
       </header>
 
       {!hasOutcome ? (
         <section className="cinema-home" aria-label="Choose a movie">
           <div className="cinema-intro">
-            <span className="lobby-kicker"><i /> NOW SHOWING</span>
-            <h1>The best seat<br /><em>still open.</em></h1>
-            <p>Choose a movie, tell us where, and go straight to the strongest live seat map.</p>
-            <button className="primary-lobby-action" onClick={() => openQuery()} type="button">Search any movie <span>→</span></button>
-            <div className="lobby-assurance"><span>Live inventory</span><span>Read only</span><span>Final recheck</span></div>
+            <h1>Find the best seat.</h1>
+            <p>Search live showtimes and seat maps near you.</p>
+            <button className="primary-lobby-action" onClick={() => openQuery()} type="button">Search movies <span aria-hidden="true">→</span></button>
           </div>
 
           <div className="now-playing">
@@ -367,12 +497,20 @@ export function SearchExperience() {
               </div>
             </div>
             <div className="movie-rail" ref={movieRail}>
-              {trendingState === "loading" ? Array.from({ length: 6 }, (_, index) => <div className="poster-skeleton" key={index}><i /><span /></div>) : null}
+              {trendingState === "loading" ? Array.from({ length: 6 }, (_, index) => <div aria-hidden="true" className="poster-skeleton" key={index}><i /><span><b /><small /><em /></span></div>) : null}
               {trending.map((movie, index) => (
                 <button className="movie-card" key={movie.id} onClick={() => openQuery(movie)} type="button">
                   <span className="poster-frame">
                     {/* eslint-disable-next-line @next/next/no-img-element -- provider poster hosts are dynamic. */}
-                    <img alt={`${movie.title} poster`} loading={index < 3 ? "eager" : "lazy"} src={movie.poster_url} />
+                    <img
+                      alt={`${movie.title} poster`}
+                      decoding="async"
+                      fetchPriority={index < 2 ? "high" : "auto"}
+                      height="305"
+                      loading={index < 5 ? "eager" : "lazy"}
+                      src={movie.poster_url}
+                      width="206"
+                    />
                     <i>{String(index + 1).padStart(2, "0")}</i>
                   </span>
                   <span className="movie-card-copy">
@@ -408,7 +546,7 @@ export function SearchExperience() {
         <div className="modal-layer" onMouseDown={() => !searching && setQueryOpen(false)}>
           <div aria-labelledby="query-title" aria-modal="true" className="query-dialog" onMouseDown={(event) => event.stopPropagation()} role="dialog">
             <div className="dialog-head">
-              <div><span>NEW SEAT SEARCH</span><h2 id="query-title">Set the essentials.</h2><p>The rest already has sensible defaults.</p></div>
+              <div><h2 id="query-title">Search</h2></div>
               <button aria-label="Close search" disabled={searching} onClick={() => setQueryOpen(false)} type="button">×</button>
             </div>
             <form className="query-form" onSubmit={search} aria-label="Best seat query">
@@ -454,38 +592,41 @@ export function SearchExperience() {
                   {suggestionsOpen && movieSuggestions.length ? <ul className="movie-suggestions" id={suggestionsID} role="listbox">{movieSuggestions.map((suggestion, index) => <li aria-selected={index === activeSuggestion} id={`${suggestionsID}-${index}`} key={suggestion.id} role="option"><button onMouseDown={(event) => event.preventDefault()} onClick={() => chooseMovie(suggestion)} type="button"><span>{suggestion.title}</span><small>{suggestion.year || "Release pending"}</small></button></li>)}</ul> : null}
                 </label>
 
-                <label className="field location-field">
-                  <FieldLabel>Near</FieldLabel>
-                  <span className="input-action-wrap"><input onChange={(event) => { setDraft((current) => ({ ...current, location: event.target.value, latitude: undefined, longitude: undefined })); setLocationProblem(""); }} placeholder={postalLocationSupported ? "ZIP code" : "Location"} value={draft.location} required /><button onClick={useCurrentLocation} type="button">{locating ? "…" : "⌖"}</button></span>
-                  <span className="field-hint">{hasCoordinates ? "Current area set" : postalLocationSupported ? "ZIP needs no location permission" : "Use the location button"}</span>
-                  {locationProblem ? <span className="location-problem" role="alert">{locationProblem}</span> : null}
-                </label>
-
-                <div className="date-pair">
+                <div className="search-schedule-row full-span">
+                  <label className="field location-field">
+                    <FieldLabel>Near</FieldLabel>
+                    <span className="input-action-wrap"><input onChange={(event) => { setDraft((current) => ({ ...current, location: event.target.value, latitude: undefined, longitude: undefined })); setLocationProblem(""); }} placeholder={postalLocationSupported ? "ZIP code" : "Location"} value={draft.location} required /><button onClick={useCurrentLocation} type="button">{locating ? "…" : "⌖"}</button></span>
+                    <span className="field-hint">{hasCoordinates ? "Current area set" : postalLocationSupported ? "ZIP needs no location permission" : "Use the location button"}</span>
+                    {locationProblem ? <span className="location-problem" role="alert">{locationProblem}</span> : null}
+                  </label>
                   <label className="field"><FieldLabel>From</FieldLabel><input type="date" value={draft.dateStart} onChange={(event) => update("dateStart", event.target.value)} required /></label>
                   <label className="field"><FieldLabel>Through</FieldLabel><input type="date" min={draft.dateStart} value={draft.dateEnd} onChange={(event) => update("dateEnd", event.target.value)} required /></label>
                 </div>
 
+                <div className={`search-time-row full-span ${timeRowMode}`}>
+                  <label className="field time-mode-field"><FieldLabel>Time</FieldLabel><select value={draft.timeMode} onChange={(event) => update("timeMode", event.target.value as TimeMode)}>{timeModes.map((mode) => <option key={mode.value} value={mode.value}>{mode.label}</option>)}</select></label>
+                  {showStartTime ? <label className="field time-bound-field"><FieldLabel>{draft.timeMode === "after" ? "After" : "From"}</FieldLabel><input type="time" value={draft.startTime} onChange={(event) => update("startTime", event.target.value)} /></label> : null}
+                  {showEndTime ? <label className="field time-bound-field"><FieldLabel>{draft.timeMode === "before" ? "Before" : "To"}</FieldLabel><input type="time" value={draft.endTime} onChange={(event) => update("endTime", event.target.value)} /></label> : null}
+                </div>
+
                 <label className="field"><FieldLabel>Party</FieldLabel><select value={draft.tickets} onChange={(event) => update("tickets", Number(event.target.value))}>{Array.from({ length: 8 }, (_, index) => index + 1).map((count) => <option key={count} value={count}>{count} {count === 1 ? "seat" : "seats"}</option>)}</select></label>
-                <label className="field"><FieldLabel>Best means</FieldLabel><select value={draft.profile} onChange={(event) => update("profile", event.target.value as SeatProfile)}>{profiles.map((profile) => <option key={profile.value} value={profile.value}>{profile.label} — {profile.hint}</option>)}</select></label>
+                <label className="field"><FieldLabel>Seat preference</FieldLabel><select value={draft.profile} onChange={(event) => update("profile", event.target.value as SeatProfile)}>{profiles.map((profile) => <option key={profile.value} value={profile.value}>{profile.label} — {profile.hint}</option>)}</select></label>
+                {draft.profile === "custom" ? <CustomSeatZonePicker value={draft.customSeatZone} onChange={(zone) => update("customSeatZone", zone)} /> : null}
               </div>
 
               <details className="query-options">
-                <summary><span><b>Fine-tune the search</b><small>{timeModes.find((mode) => mode.value === draft.timeMode)?.label} · {draft.formats.length} formats · {draft.maxDistance} mi</small></span><i>+</i></summary>
+                <summary><span><b>More settings</b><small>{timeModes.find((mode) => mode.value === draft.timeMode)?.label} · {draft.formats.length} formats · {draft.maxDistance} mi</small></span><i>+</i></summary>
                 <div className="option-grid">
-                  <label className="field"><FieldLabel>Time rule</FieldLabel><select value={draft.timeMode} onChange={(event) => update("timeMode", event.target.value as TimeMode)}>{timeModes.map((mode) => <option key={mode.value} value={mode.value}>{mode.label}</option>)}</select></label>
-                  <label className="field"><FieldLabel>From</FieldLabel><input type="time" value={draft.startTime} disabled={draft.timeMode === "any" || draft.timeMode === "before"} onChange={(event) => update("startTime", event.target.value)} /></label>
-                  <label className="field"><FieldLabel>To</FieldLabel><input type="time" value={draft.endTime} disabled={draft.timeMode === "any" || draft.timeMode === "after"} onChange={(event) => update("endTime", event.target.value)} /></label>
                   <fieldset className="format-fieldset full-span"><legend>Formats</legend><div className="chip-row six-chips">{formatOptions.map((format) => <button aria-pressed={draft.formats.includes(format)} className={draft.formats.includes(format) ? "format-chip active" : "format-chip"} key={format} onClick={() => toggleFormat(format)} type="button"><span>{draft.formats.includes(format) ? "✓" : "+"}</span>{format}</button>)}</div></fieldset>
                   <label className="field range-field"><FieldLabel>Distance <em>{draft.maxDistance} mi</em></FieldLabel><input type="range" min="2" max="49" value={draft.maxDistance} onChange={(event) => update("maxDistance", Number(event.target.value))} /></label>
-                  <label className="check-field"><input type="checkbox" checked={draft.limitPrice} onChange={(event) => update("limitPrice", event.target.checked)} /><span><b>Price ceiling</b><small>{draft.limitPrice ? `$${draft.maxPrice} total` : "Any price"}</small></span></label>
+                  <label className="check-field price-ceiling-toggle"><input type="checkbox" checked={draft.limitPrice} onChange={(event) => update("limitPrice", event.target.checked)} /><span><b>Price ceiling</b><small>{draft.limitPrice ? `$${draft.maxPrice} total` : "Any price"}</small></span></label>
                   {draft.limitPrice ? <label className="field range-field"><FieldLabel>Maximum total <em>${draft.maxPrice}</em></FieldLabel><input type="range" min="10" max="200" step="5" value={draft.maxPrice} onChange={(event) => update("maxPrice", Number(event.target.value))} /></label> : null}
                   <label className="field"><FieldLabel>Captions</FieldLabel><select value={draft.captions} onChange={(event) => update("captions", event.target.value)}><option value="any">Any captions</option><option value="open">Open required</option><option value="closed">Closed required</option><option value="none">No captions</option></select></label>
                   <label className="field"><FieldLabel>Skip front</FieldLabel><select value={draft.excludeFirstRows} onChange={(event) => update("excludeFirstRows", Number(event.target.value))}>{[0,1,2,3,4].map((count) => <option key={count} value={count}>{count} rows</option>)}</select></label>
                   <label className="field"><FieldLabel>Wheelchair spaces</FieldLabel><select value={draft.wheelchairSpaces} onChange={(event) => update("wheelchairSpaces", Number(event.target.value))}>{[0,1,2,3,4].map((count) => <option key={count} value={count}>{count}</option>)}</select></label>
                   <label className="field"><FieldLabel>Companion seats</FieldLabel><select value={draft.companionSeats} onChange={(event) => update("companionSeats", Number(event.target.value))}>{[0,1,2,3,4].map((count) => <option key={count} value={count}>{count}</option>)}</select></label>
-                  <label className="check-field"><input type="checkbox" checked={draft.recliners} onChange={(event) => update("recliners", event.target.checked)} /><span><b>Recliners</b><small>Required</small></span></label>
-                  <label className="check-field"><input type="checkbox" checked={draft.audioDescription} onChange={(event) => update("audioDescription", event.target.checked)} /><span><b>Audio description</b><small>Required</small></span></label>
+                  <label className="check-field"><input type="checkbox" checked={draft.recliners} onChange={(event) => update("recliners", event.target.checked)} /><span><b>Recliners</b><small>Check box if required</small></span></label>
+                  <label className="check-field"><input type="checkbox" checked={draft.audioDescription} onChange={(event) => update("audioDescription", event.target.checked)} /><span><b>Audio description</b><small>Check box if required</small></span></label>
                   <label className="check-field"><input type="checkbox" checked={draft.allowSplit} onChange={(event) => update("allowSplit", event.target.checked)} /><span><b>Split party</b><small>Allow if needed</small></span></label>
                 </div>
               </details>
@@ -507,7 +648,7 @@ function ProblemPanel({ problem, onRetry }: { problem: Problem; onRetry: () => v
 }
 
 function InfoDialog({ onClose }: { onClose: () => void }) {
-  return <div className="modal-layer info-layer" onMouseDown={onClose}><div aria-labelledby="info-title" aria-modal="true" className="info-dialog" onMouseDown={(event) => event.stopPropagation()} role="dialog"><div className="dialog-head"><div><span>THE SHORT VERSION</span><h2 id="info-title">How CenterSeat chooses.</h2><p>Expensive live checks happen only after easy exclusions.</p></div><button aria-label="Close explanation" onClick={onClose} type="button">×</button></div><ol className="compact-method"><li><b>1</b><span>Discover<small>Every matching date and showtime</small></span></li><li><b>2</b><span>Filter<small>Time, distance, format, price and access</small></span></li><li><b>3</b><span>Compare live seats<small>Starts with the strongest screenings and expands automatically when needed</small></span></li><li><b>4</b><span>Rank geometry<small>Real coordinates, not seat-label guesses</small></span></li><li><b>5</b><span>Recheck<small>The winner gets one final live read</small></span></li></ol><p className="info-note">CenterSeat never creates a cart, hold, or purchase. Availability may change until the theater confirms it.</p></div></div>;
+  return <div className="modal-layer info-layer" onMouseDown={onClose}><div aria-labelledby="info-title" aria-modal="true" className="info-dialog" onMouseDown={(event) => event.stopPropagation()} role="dialog"><div className="dialog-head"><div><span>THE SHORT VERSION</span><h2 id="info-title">How CenterSeat chooses.</h2><p>Expensive live checks happen only after easy exclusions.</p></div><button aria-label="Close explanation" onClick={onClose} type="button">×</button></div><ol className="compact-method"><li><b>1</b><span>Discover<small>Every matching date and showtime</small></span></li><li><b>2</b><span>Filter<small>Time, distance, format, price and access</small></span></li><li><b>3</b><span>Compare live seats<small>Keeps checks moving in parallel and expands automatically across every date</small></span></li><li><b>4</b><span>Prove the winner<small>Stops early only when no remaining screening can score higher</small></span></li><li><b>5</b><span>Recheck<small>The winner gets one final live read</small></span></li></ol><p className="info-note">CenterSeat never creates a cart, hold, or purchase. Availability may change until the theater confirms it.</p></div></div>;
 }
 
 function ShowtimeResults({ result }: { result: ShowtimeQueryResponse }) {
@@ -517,20 +658,22 @@ function ShowtimeResults({ result }: { result: ShowtimeQueryResponse }) {
 function QueryDiagnostics({ coverage }: { coverage: SeatQueryResponse["coverage"] }) {
   const failed = coverage.inventories_failed ?? coverage.providers_degraded ?? 0;
   const reasons = Object.entries(coverage.inventory_failure_reasons ?? {}).filter(([, count]) => count > 0).map(([reason, count]) => `${count} ${humanize(reason).toLowerCase()}`).join(" · ");
-  return <div className="compact-diagnostics"><span><b>{coverage.inventories_fresh}/{coverage.inventories_checked}</b> live checks complete</span><span><b>{coverage.screenings_unavailable ?? 0}</b> no matching seats</span><span><b>{coverage.screenings_price_rejected ?? 0}</b> over price</span><span className={failed ? "has-failure" : ""}><b>{failed}</b> checks unavailable{reasons ? <small>{reasons}</small> : null}</span></div>;
+  return <div className="compact-diagnostics"><span><b>{coverage.inventories_checked}</b> screenings checked</span><span><b>{coverage.inventories_fresh}</b> live maps loaded</span><span><b>{coverage.screenings_unavailable ?? 0}</b> unavailable or no seat match</span><span className={failed ? "has-failure" : ""}><b>{failed}</b> checks interrupted{reasons ? <small>{reasons}</small> : null}</span></div>;
 }
 
 function LiveResult({ result }: { result: SeatQueryResponse }) {
   const winner = result.winner as Recommendation;
   const [active, setActive] = useState<Recommendation>(winner);
+  const [loadedRecommendations, setLoadedRecommendations] = useState<Record<number, Recommendation>>({ [winner.rank]: winner });
   const [loadingRank, setLoadingRank] = useState<number | null>(null);
   const [mapProblem, setMapProblem] = useState("");
 
   const openRecommendation = async (recommendation: Recommendation) => {
-    if (recommendation.rank === active.rank && recommendation.seat_map) return;
+    const loaded = loadedRecommendations[recommendation.rank] ?? recommendation;
+    if (loaded.rank === active.rank && loaded.seat_map) return;
     setMapProblem("");
-    if (recommendation.seat_map) {
-      setActive(recommendation);
+    if (loaded.seat_map) {
+      setActive(loaded);
       return;
     }
     setLoadingRank(recommendation.rank);
@@ -538,7 +681,9 @@ function LiveResult({ result }: { result: SeatQueryResponse }) {
       const response = await fetch(`/api/seat-recommendations?query_id=${encodeURIComponent(result.query_id)}&rank=${recommendation.rank}`, { cache: "no-store" });
       const body = await response.json();
       if (!response.ok) throw new Error(body.detail ?? "The selected map could not be refreshed.");
-      setActive(body as Recommendation);
+      const refreshed = body as Recommendation;
+      setLoadedRecommendations((current) => ({ ...current, [refreshed.rank]: refreshed }));
+      setActive(refreshed);
     } catch (error) {
       setMapProblem(error instanceof Error ? error.message : "The selected map could not be refreshed.");
     } finally {
@@ -551,10 +696,11 @@ function LiveResult({ result }: { result: SeatQueryResponse }) {
   const showtime = showtimeLabels(active);
   const availableCount = active.seat_map?.seats.filter((seat) => seat.status === "available").length ?? 0;
   const activeIsFinal = active.rank !== 1 || result.coverage.winner_verified;
+  const recommendationChoices = [winner, ...result.alternatives].map((recommendation) => loadedRecommendations[recommendation.rank] ?? recommendation);
 
   return <div className="result-workspace">
     <section className="seat-focus">
-      <div className="seat-focus-head"><div><span>{active.rank === 1 ? "BEST AVAILABLE" : `ALTERNATIVE ${active.rank}`} · {activeIsFinal ? "FINAL CHECK" : "INITIAL CHECK"}</span><h2>{labels.join(" · ")}</h2><p>{active.showtime.venue_name}{active.showtime.auditorium_name ? ` · ${active.showtime.auditorium_name}` : ""}</p></div><div className="match-score"><b>{active.score}</b><small>/100 match</small></div></div>
+      <div className="seat-focus-head"><div><span>{active.rank === 1 ? (result.coverage.range_best_proven ? "BEST ACROSS RANGE" : "BEST FOUND") : `ALTERNATIVE ${active.rank}`} · {activeIsFinal ? "FINAL CHECK" : "INITIAL CHECK"} · {active.profile_match === "closest_fallback" ? "CLOSEST FALLBACK" : "PREFERRED ZONE"}</span><h2>{labels.join(" · ")}</h2><p>{active.showtime.venue_name}{active.showtime.auditorium_name ? ` · ${active.showtime.auditorium_name}` : ""}</p></div><div className="match-score"><b>{active.score}</b><small>/100 match</small></div></div>
       <div className="seat-map-wrap"><SeatMap recommendation={active} /></div>
     </section>
 
@@ -562,10 +708,18 @@ function LiveResult({ result }: { result: SeatQueryResponse }) {
       <div className="result-facts"><span><small>WHEN</small><b>{showtime.time}</b><em>{showtime.date}</em></span><span><small>FORMAT</small><b>{humanize(active.showtime.format)}</b><em>{active.showtime.distance_miles.toFixed(1)} mi away</em></span><span><small>LIVE MAP</small><b>{availableCount} open</b><em>{activeIsFinal ? "Reverified" : "Refresh incomplete"}</em></span></div>
       {active.booking_url ? <a className="booking-link" href={active.booking_url} target="_blank" rel="noreferrer">Continue at provider <span>↗</span></a> : <div className="booking-unavailable">No provider booking link returned.</div>}
 
-      {result.alternatives.length ? <div className="alternative-list"><div className="rail-section-title"><span>OTHER STRONG OPTIONS</span><small>Tap to open its live map</small></div>{result.alternatives.map((recommendation) => { const recommendationLabels = (recommendation.seat_options?.length ? recommendation.seat_options : recommendation.seats).map((seat) => seat.label); const time = showtimeLabels(recommendation); return <button aria-pressed={active.rank === recommendation.rank} className={active.rank === recommendation.rank ? "selected" : ""} disabled={loadingRank !== null} key={recommendation.showtime.id} onClick={() => openRecommendation(recommendation)} type="button"><span><b>{recommendationLabels.join(" · ")}</b><small>{recommendation.showtime.venue_name}</small></span><span><b>{loadingRank === recommendation.rank ? "…" : recommendation.score}</b><small>{time.time}</small></span></button>; })}</div> : null}
+      <div className="alternative-list">
+        <div className="rail-section-title"><span>COMPARE LIVE OPTIONS</span><small>Return to the best match or open another map</small></div>
+        {recommendationChoices.map((recommendation) => {
+          const recommendationLabels = (recommendation.seat_options?.length ? recommendation.seat_options : recommendation.seats).map((seat) => seat.label);
+          const time = showtimeLabels(recommendation);
+          const selected = active.rank === recommendation.rank;
+          return <button aria-label={`${recommendation.rank === 1 ? "Best match" : `Option ${recommendation.rank}`}: ${recommendationLabels.join(", ")}`} aria-pressed={selected} className={`${selected ? "selected" : ""}${recommendation.rank === 1 ? " best-choice" : ""}`} disabled={loadingRank !== null} key={recommendation.showtime.id} onClick={() => openRecommendation(recommendation)} type="button"><span><em>{recommendation.rank === 1 ? "BEST MATCH" : `OPTION ${recommendation.rank}`}</em><b>{recommendationLabels.join(" · ")}</b><small>{recommendation.showtime.venue_name}</small></span><span><b>{loadingRank === recommendation.rank ? "…" : recommendation.score}</b><small>{time.time}</small></span></button>;
+        })}
+      </div>
 
       <details className="result-detail"><summary><span>Why this seat</span><i>+</i></summary><p>{active.explanation[0]}</p><ul>{Object.entries(active.score_breakdown).map(([key, value]) => <li key={key}><span>{humanize(key)}</span><b>{Math.round(value)}</b></li>)}</ul></details>
-      <details className="result-detail"><summary><span>Query details</span><i>+</i></summary><QueryDiagnostics coverage={result.coverage} /><p>{result.coverage.screenings_discovered} showtimes discovered · {result.coverage.elapsed_ms} ms</p></details>
+      <details className="result-detail"><summary><span>Query details</span><i>+</i></summary><QueryDiagnostics coverage={result.coverage} /><p>{result.coverage.dates_compared} of {result.coverage.dates_with_screenings} dates compared · {result.coverage.range_best_proven ? "No remaining screening could beat this result" : "Range winner not fully proven"} · {result.coverage.screenings_discovered} showtimes discovered · discovery {result.coverage.discovery_ms} ms · live maps {result.coverage.inventory_ms} ms · final check {result.coverage.verification_ms} ms</p></details>
       {mapProblem ? <div className="rail-warning" role="alert">{mapProblem}</div> : null}
       {result.warnings?.map((warning) => <div className="rail-warning" key={warning}>{warning}</div>)}
       <small className="read-only-note">Read only · no order or seat hold created</small>

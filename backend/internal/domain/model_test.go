@@ -32,3 +32,41 @@ func TestQueryStillRequiresSomeLocationSignal(t *testing.T) {
 		t.Fatal("expected a missing-location validation error")
 	}
 }
+
+func TestQueryUsesTheFullAutomaticCandidateSafetyCeiling(t *testing.T) {
+	query := QueryRequest{Dates: DateConstraint{Start: "2026-08-01", End: "2026-08-07"}}
+	query.SetDefaults()
+	if query.CandidateLimit != 64 {
+		t.Fatalf("expected the automatic safety ceiling for a dense short range, got %d", query.CandidateLimit)
+	}
+
+	query = QueryRequest{Dates: DateConstraint{Start: "2026-08-01", End: "2026-08-31"}}
+	query.SetDefaults()
+	if query.CandidateLimit != 64 {
+		t.Fatalf("expected the automatic safety ceiling, got %d", query.CandidateLimit)
+	}
+}
+
+func TestCustomSeatProfileRequiresValidNormalizedZone(t *testing.T) {
+	base := QueryRequest{
+		MovieQuery: "Test Film", Location: LocationConstraint{Query: "28202", RadiusMiles: 25},
+		Dates: DateConstraint{Start: "2026-08-01", End: "2026-08-01"}, TicketCount: 1,
+		SeatProfile: "custom", MaxDistanceMiles: 25, CandidateLimit: 10,
+	}
+	base.SetDefaults()
+	if err := base.Validate(); err == nil {
+		t.Fatal("expected custom profile without a zone to fail")
+	}
+
+	invalid := base
+	invalid.CustomSeatZone = &SeatZone{MinimumX: .8, MaximumX: .2, MinimumY: .4, MaximumY: .7}
+	if err := invalid.Validate(); err == nil {
+		t.Fatal("expected inverted custom zone to fail")
+	}
+
+	valid := base
+	valid.CustomSeatZone = &SeatZone{MinimumX: .2, MaximumX: .8, MinimumY: .4, MaximumY: .75}
+	if err := valid.Validate(); err != nil {
+		t.Fatalf("expected normalized custom zone to pass: %v", err)
+	}
+}

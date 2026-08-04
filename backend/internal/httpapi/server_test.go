@@ -57,6 +57,31 @@ func TestCreateQueryIsIdempotentAndCacheable(t *testing.T) {
 	}
 }
 
+func TestCreateQueryAcceptsCustomNormalizedSeatZone(t *testing.T) {
+	provider := testfixtures.Provider{}
+	server := New(service.New(provider, provider, 3), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	today := time.Now().Format(time.DateOnly)
+	zone := domain.SeatZone{MinimumX: .15, MaximumX: .85, MinimumY: .2, MaximumY: .9}
+	payload, _ := json.Marshal(domain.QueryRequest{
+		MovieQuery: "Test Film", Location: domain.LocationConstraint{Query: "Charlotte", RadiusMiles: 25},
+		Dates: domain.DateConstraint{Start: today, End: today}, TicketCount: 1,
+		SeatProfile: "custom", CustomSeatZone: &zone, CandidateLimit: 10, MaxDistanceMiles: 25,
+	})
+	req := httptest.NewRequest(http.MethodPost, "/v1/seat-queries", bytes.NewReader(payload))
+	rec := httptest.NewRecorder()
+	server.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
+	}
+	var response domain.QueryResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if response.Winner.SeatMap == nil || response.Winner.SeatMap.PreferredZone == nil {
+		t.Fatalf("expected custom zone in the recommendation map, got %#v", response.Winner)
+	}
+}
+
 func TestCreateShowtimeQueryReturnsDiscoveryResults(t *testing.T) {
 	provider := testfixtures.Provider{}
 	server := New(service.New(provider, provider, 3), slog.New(slog.NewTextHandler(io.Discard, nil)))

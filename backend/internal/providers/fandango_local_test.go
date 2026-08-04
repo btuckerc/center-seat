@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -142,6 +143,90 @@ func TestFandangoLocalReadOnlyDiscoveryAndInventory(t *testing.T) {
 	}
 }
 
+func TestFandangoLocalCoalescesConcurrentInventoryReads(t *testing.T) {
+	var reads atomic.Int32
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/napi/seatMap/shared-hash" {
+			http.NotFound(w, r)
+			return
+		}
+		reads.Add(1)
+		time.Sleep(40 * time.Millisecond)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"totalWidth": 100, "totalHeight": 100,
+			"seats": []map[string]any{{
+				"id": "A1", "row": 1, "column": 1, "x": 0, "y": 0,
+				"width": 20, "height": 20, "type": "standard", "status": "A",
+			}},
+		})
+	}))
+	defer server.Close()
+	provider, err := NewFandangoLocal(FandangoLocalConfig{
+		BaseURL: server.URL, RequestTimeout: time.Second, MinimumDelay: time.Millisecond, MaxConcurrency: 8,
+	}, server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	showtime := domain.Showtime{ID: "showtime", SeatLayoutID: "shared-hash", InventoryProvider: fandangoProviderName}
+	start := make(chan struct{})
+	readErrors := make(chan error, 12)
+	var wait sync.WaitGroup
+	for range 12 {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			<-start
+			inventory, err := provider.GetAvailability(context.Background(), showtime, false)
+			if err == nil && len(inventory.Seats) != 1 {
+				err = errors.New("coalesced inventory was incomplete")
+			}
+			readErrors <- err
+		}()
+	}
+	close(start)
+	wait.Wait()
+	close(readErrors)
+	for err := range readErrors {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if reads.Load() != 1 {
+		t.Fatalf("expected one shared upstream read, got %d", reads.Load())
+	}
+}
+
+func TestFandangoFormatComesFromTheShowtimeNotTheaterAmenities(t *testing.T) {
+	var response fandangoShowtimeGroupingsResponse
+	err := json.Unmarshal([]byte(`{
+		"theaterShowtimes":{"theaters":[{
+			"id":"theater-1","name":"Multiplex with IMAX","distance":4.2,
+			"amenities":[{"name":"IMAX"}],
+			"variants":[
+				{"filmFormatHeader":"Standard","amenityGroups":[{"hasReservedSeating":true,"showtimes":[{"id":"standard","dateUtc":"2026-08-06T18:00:00Z","showtimeHashCode":"hash-standard","ticketingJumpPageURL":"https://tickets.fandango.com/standard"}]}]},
+				{"filmFormatHeader":"3D","amenityGroups":[{"hasReservedSeating":true,"showtimes":[{"id":"three-d","dateUtc":"2026-08-06T19:00:00Z","filmFormat":[{"filterName":"3D"}],"showtimeHashCode":"hash-three-d","ticketingJumpPageURL":"https://tickets.fandango.com/three-d"}]}]},
+				{"filmFormatHeader":"Premium Format","amenityGroups":[{"hasReservedSeating":true,"showtimes":[{"id":"imax","dateUtc":"2026-08-06T20:00:00Z","filmFormat":[{"filterName":"IMAX"}],"showtimeHashCode":"hash-imax","ticketingJumpPageURL":"https://tickets.fandango.com/imax"}]}]}
+			]
+		}]}
+	}`), &response)
+	if err != nil {
+		t.Fatal(err)
+	}
+	showtimes := normalizeFandangoShowtimes(response, fandangoMovie{ID: "243819", Name: "Spider-Man: Brand New Day"}, domain.QueryRequest{
+		Time: domain.TimeConstraint{Timezone: "America/New_York"},
+	})
+	formats := map[string]string{}
+	for _, showtime := range showtimes {
+		formats[showtime.ID] = showtime.Format
+		if !showtime.ReservedSeating || !contains(showtime.Amenities, "reserved_seating") {
+			t.Fatalf("reserved-seating capability was lost: %#v", showtime)
+		}
+	}
+	if formats["standard"] != "standard" || formats["three-d"] != "3d" || formats["imax"] != "imax" {
+		t.Fatalf("theater-level IMAX availability polluted per-showtime formats: %#v", formats)
+	}
+}
+
 func TestFandangoLocalSafetyBoundaries(t *testing.T) {
 	if _, err := NewFandangoLocal(FandangoLocalConfig{BaseURL: "https://example.org"}, nil); err == nil {
 		t.Fatal("expected a non-Fandango production host to be rejected")
@@ -241,6 +326,34 @@ func TestFandangoLocalRetriesInterruptedTransportReads(t *testing.T) {
 	}
 	if attempts.Load() != 3 {
 		t.Fatalf("expected interrupted transport reads to receive two bounded retries, got %d attempts", attempts.Load())
+	}
+}
+
+func TestFandangoLocalFailsClosedWhenAnyRequestedDateCannotBeDiscovered(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/napi/theaterShowtimeGroupings/243819/2026-08-01":
+			writeFandangoGrouping(t, w, "501", "hash-one", "2026-08-01T23:30:00Z")
+		case "/napi/theaterShowtimeGroupings/243819/2026-08-02":
+			http.Error(w, "temporary upstream failure", http.StatusInternalServerError)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	provider, err := NewFandangoLocal(FandangoLocalConfig{
+		BaseURL: server.URL, RequestTimeout: 2 * time.Second, MinimumDelay: time.Millisecond, MaxConcurrency: 2,
+	}, server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = provider.Discover(context.Background(), domain.QueryRequest{
+		MovieQuery: "Spider-Man: Brand New Day", MovieID: "243819",
+		Location: domain.LocationConstraint{Latitude: 35.2271, Longitude: -80.8431, RadiusMiles: 25},
+		Dates:    domain.DateConstraint{Start: "2026-08-01", End: "2026-08-02"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "1 of 2 Fandango date queries failed after retries") {
+		t.Fatalf("expected partial date discovery to fail closed, got %v", err)
 	}
 }
 

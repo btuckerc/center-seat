@@ -30,6 +30,10 @@ export async function generateMetadata(): Promise<Metadata> {
   return {
     title,
     description,
+    icons: {
+      icon: [{ url: "/icon.png", type: "image/png", sizes: "64x64" }],
+      shortcut: "/icon.png",
+    },
     openGraph: {
       title,
       description,
@@ -52,6 +56,9 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en">
+      <head>
+        <link rel="preconnect" href="https://resizing.flixster.com" />
+      </head>
       <body className={`${geistSans.variable} ${geistMono.variable}`}>
         {children}
       </body>

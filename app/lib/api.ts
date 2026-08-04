@@ -5,7 +5,15 @@ export type SeatProfile =
   | "two_thirds_back"
   | "aisle"
   | "front"
-  | "back";
+  | "back"
+  | "custom";
+
+export type NormalizedSeatZone = {
+  minimumX: number;
+  maximumX: number;
+  minimumY: number;
+  maximumY: number;
+};
 
 export type QueryState = {
   movie: string;
@@ -20,6 +28,7 @@ export type QueryState = {
   startTime: string;
   endTime: string;
   profile: SeatProfile;
+  customSeatZone: NormalizedSeatZone;
   formats: string[];
   maxDistance: number;
   maxPrice: number;
@@ -69,11 +78,14 @@ export type Recommendation = {
   confidence: string;
   explanation: string[];
   score_breakdown: Record<string, number>;
+  profile_match: "preferred_zone" | "closest_fallback";
   verified_at: string;
   booking_url?: string;
   seat_map?: {
     seats: Seat[];
     target: { x: number; y: number };
+    preferred_depth?: { minimum: number; maximum: number };
+    preferred_zone_bounds?: { minimum_x: number; maximum_x: number; minimum_y: number; maximum_y: number };
     recommended_zone?: string[];
     confidence: string;
     observed_at: string;
@@ -86,6 +98,10 @@ export type SeatQueryResponse = {
   generated_at: string;
   expires_at: string;
   coverage: {
+    dates_requested: number;
+    dates_with_screenings: number;
+    dates_compared: number;
+    range_best_proven: boolean;
     screenings_discovered: number;
     screenings_pruned: number;
     inventories_checked: number;
@@ -96,6 +112,9 @@ export type SeatQueryResponse = {
     inventory_failure_reasons: Record<string, number>;
     winner_verified: boolean;
     providers_degraded: number;
+    discovery_ms: number;
+    inventory_ms: number;
+    verification_ms: number;
     elapsed_ms: number;
   };
   winner: Recommendation | null;
@@ -159,11 +178,12 @@ export function createDefaultQuery(): QueryState {
     location: "",
     dateStart: localDate(start),
     dateEnd: localDate(end),
-    tickets: 1,
+    tickets: 2,
     timeMode: "any",
     startTime: "17:00",
     endTime: "22:00",
     profile: "dead_center",
+    customSeatZone: { minimumX: .28, maximumX: .72, minimumY: .42, maximumY: .76 },
     formats: ["Standard", "Dolby", "IMAX"],
     maxDistance: 25,
     maxPrice: 60,

@@ -26,6 +26,13 @@ type TimeConstraint struct {
 	Timezone string `json:"timezone,omitempty"`
 }
 
+type SeatZone struct {
+	MinimumX float64 `json:"minimum_x"`
+	MaximumX float64 `json:"maximum_x"`
+	MinimumY float64 `json:"minimum_y"`
+	MaximumY float64 `json:"maximum_y"`
+}
+
 type QueryRequest struct {
 	MovieQuery                string             `json:"movie_query"`
 	MovieID                   string             `json:"movie_id,omitempty"`
@@ -34,6 +41,7 @@ type QueryRequest struct {
 	Time                      TimeConstraint     `json:"time,omitempty"`
 	TicketCount               int                `json:"ticket_count"`
 	SeatProfile               string             `json:"seat_profile"`
+	CustomSeatZone            *SeatZone          `json:"custom_seat_zone,omitempty"`
 	Formats                   []string           `json:"formats,omitempty"`
 	Language                  string             `json:"language,omitempty"`
 	Captions                  string             `json:"captions,omitempty"`
@@ -77,7 +85,7 @@ func (q *QueryRequest) SetDefaults() {
 		q.MinimumGeometryConfidence = "row_geometry"
 	}
 	if q.CandidateLimit == 0 {
-		q.CandidateLimit = 18
+		q.CandidateLimit = automaticCandidateLimit(q.Dates)
 	}
 }
 
@@ -120,9 +128,21 @@ func (q QueryRequest) Validate() error {
 	if end.Sub(start) > 31*24*time.Hour {
 		return errors.New("date range cannot exceed 31 days")
 	}
-	validProfiles := map[string]bool{"balanced": true, "dead_center": true, "two_thirds_back": true, "aisle": true, "front": true, "back": true}
+	validProfiles := map[string]bool{"balanced": true, "dead_center": true, "two_thirds_back": true, "aisle": true, "front": true, "back": true, "custom": true}
 	if !validProfiles[q.SeatProfile] {
 		return fmt.Errorf("unsupported seat_profile %q", q.SeatProfile)
+	}
+	if q.SeatProfile == "custom" && q.CustomSeatZone == nil {
+		return errors.New("custom_seat_zone is required when seat_profile is custom")
+	}
+	if q.CustomSeatZone != nil {
+		zone := q.CustomSeatZone
+		if zone.MinimumX < 0 || zone.MaximumX > 1 || zone.MinimumY < 0 || zone.MaximumY > 1 {
+			return errors.New("custom_seat_zone coordinates must be between 0 and 1")
+		}
+		if zone.MinimumX >= zone.MaximumX || zone.MinimumY >= zone.MaximumY {
+			return errors.New("custom_seat_zone minimum coordinates must be below maximum coordinates")
+		}
 	}
 	validTimeModes := map[string]bool{"any": true, "inside": true, "outside": true, "before": true, "after": true}
 	if !validTimeModes[q.Time.Mode] {
@@ -136,8 +156,8 @@ func (q QueryRequest) Validate() error {
 			return errors.New("time.end is required for this time mode")
 		}
 	}
-	if q.CandidateLimit < 1 || q.CandidateLimit > 25 {
-		return errors.New("candidate_limit must be between 1 and 25")
+	if q.CandidateLimit < 1 || q.CandidateLimit > 64 {
+		return errors.New("candidate_limit must be between 1 and 64")
 	}
 	if q.MinStartNoticeMinutes < 0 || q.MinStartNoticeMinutes > 1440 {
 		return errors.New("min_start_notice_minutes must be between 0 and 1440")
@@ -150,6 +170,13 @@ func (q QueryRequest) Validate() error {
 		return fmt.Errorf("unsupported minimum_geometry_confidence %q", q.MinimumGeometryConfidence)
 	}
 	return nil
+}
+
+func automaticCandidateLimit(DateConstraint) int {
+	// Adaptive proof-based stopping normally finishes well before this ceiling.
+	// Keeping the full internal allowance available prevents a dense short date
+	// range from being less complete than a longer one.
+	return 64
 }
 
 type Showtime struct {
@@ -204,6 +231,7 @@ type Recommendation struct {
 	Confidence     string             `json:"confidence"`
 	Explanation    []string           `json:"explanation"`
 	ScoreBreakdown map[string]float64 `json:"score_breakdown"`
+	ProfileMatch   string             `json:"profile_match"`
 	VerifiedAt     time.Time          `json:"verified_at"`
 	BookingURL     string             `json:"booking_url"`
 	SeatMap        *SeatMap           `json:"seat_map"`
@@ -217,12 +245,23 @@ type GeometryPoint struct {
 type SeatMap struct {
 	Seats           []Seat        `json:"seats"`
 	Target          GeometryPoint `json:"target"`
+	PreferredDepth  *DepthRange   `json:"preferred_depth,omitempty"`
+	PreferredZone   *SeatZone     `json:"preferred_zone_bounds,omitempty"`
 	RecommendedZone []string      `json:"recommended_zone,omitempty"`
 	Confidence      string        `json:"confidence"`
 	ObservedAt      time.Time     `json:"observed_at"`
 }
 
+type DepthRange struct {
+	Minimum float64 `json:"minimum"`
+	Maximum float64 `json:"maximum"`
+}
+
 type Coverage struct {
+	DatesRequested          int            `json:"dates_requested"`
+	DatesWithScreenings     int            `json:"dates_with_screenings"`
+	DatesCompared           int            `json:"dates_compared"`
+	RangeBestProven         bool           `json:"range_best_proven"`
 	ScreeningsDiscovered    int            `json:"screenings_discovered"`
 	ScreeningsPruned        int            `json:"screenings_pruned"`
 	InventoriesChecked      int            `json:"inventories_checked"`
@@ -233,6 +272,9 @@ type Coverage struct {
 	InventoryFailureReasons map[string]int `json:"inventory_failure_reasons"`
 	WinnerVerified          bool           `json:"winner_verified"`
 	ProvidersDegraded       int            `json:"providers_degraded"`
+	DiscoveryMS             int            `json:"discovery_ms"`
+	InventoryMS             int            `json:"inventory_ms"`
+	VerificationMS          int            `json:"verification_ms"`
 	ElapsedMS               int            `json:"elapsed_ms"`
 }
 

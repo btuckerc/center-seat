@@ -51,6 +51,14 @@ type FandangoLocal struct {
 	movieCache     map[string]cachedFandangoMovie
 	discoveryCache map[string]cachedFandangoShowtimes
 	inventoryCache map[string]cachedFandangoInventory
+	flightMu       sync.Mutex
+	inventoryReads map[string]*fandangoInventoryRead
+}
+
+type fandangoInventoryRead struct {
+	done      chan struct{}
+	inventory domain.Inventory
+	err       error
 }
 
 type cachedFandangoMovie struct {
@@ -84,10 +92,10 @@ func NewFandangoLocal(config FandangoLocalConfig, client *http.Client) (*Fandang
 		config.RequestTimeout = 8 * time.Second
 	}
 	if config.MinimumDelay <= 0 {
-		config.MinimumDelay = 175 * time.Millisecond
+		config.MinimumDelay = 50 * time.Millisecond
 	}
-	if config.MaxConcurrency < 1 || config.MaxConcurrency > 4 {
-		config.MaxConcurrency = 4
+	if config.MaxConcurrency < 1 || config.MaxConcurrency > 8 {
+		config.MaxConcurrency = 8
 	}
 	if client == nil {
 		client = &http.Client{Timeout: config.RequestTimeout}
@@ -103,6 +111,7 @@ func NewFandangoLocal(config FandangoLocalConfig, client *http.Client) (*Fandang
 		movieCache:     map[string]cachedFandangoMovie{},
 		discoveryCache: map[string]cachedFandangoShowtimes{},
 		inventoryCache: map[string]cachedFandangoInventory{},
+		inventoryReads: map[string]*fandangoInventoryRead{},
 	}, nil
 }
 
@@ -194,8 +203,8 @@ func (f *FandangoLocal) Discover(ctx context.Context, query domain.QueryRequest)
 		}
 		ordered[result.index] = result.items
 	}
-	if len(failures) == len(dates) && len(failures) > 0 {
-		return nil, fmt.Errorf("all Fandango date queries failed: %w", failures[0])
+	if len(failures) > 0 {
+		return nil, fmt.Errorf("%d of %d Fandango date queries failed after retries: %w", len(failures), len(dates), failures[0])
 	}
 	showtimes := []domain.Showtime{}
 	seen := map[string]bool{}
@@ -354,15 +363,32 @@ func (f *FandangoLocal) GetAvailability(ctx context.Context, showtime domain.Sho
 	if !validFandangoOpaqueID(showtime.SeatLayoutID) {
 		return domain.Inventory{}, errors.New("Fandango showtime hash was not safe to request")
 	}
+	if final {
+		return f.readAvailability(ctx, showtime)
+	}
 	now := time.Now()
-	if !final {
-		f.cacheMu.RLock()
-		cached, ok := f.inventoryCache[showtime.SeatLayoutID]
-		f.cacheMu.RUnlock()
-		if ok && now.Before(cached.expiresAt) {
-			return cloneInventory(cached.inventory), nil
+	f.cacheMu.RLock()
+	cached, ok := f.inventoryCache[showtime.SeatLayoutID]
+	f.cacheMu.RUnlock()
+	if ok && now.Before(cached.expiresAt) {
+		return cloneInventory(cached.inventory), nil
+	}
+	read, leader := f.beginInventoryRead(showtime.SeatLayoutID)
+	if !leader {
+		select {
+		case <-read.done:
+			return cloneInventory(read.inventory), read.err
+		case <-ctx.Done():
+			return domain.Inventory{}, ctx.Err()
 		}
 	}
+	inventory, err := f.readAvailability(ctx, showtime)
+	f.finishInventoryRead(showtime.SeatLayoutID, read, inventory, err)
+	return inventory, err
+}
+
+func (f *FandangoLocal) readAvailability(ctx context.Context, showtime domain.Showtime) (domain.Inventory, error) {
+	now := time.Now()
 	var response json.RawMessage
 	if err := f.getJSON(ctx, "/napi/seatMap/"+showtime.SeatLayoutID, nil, &response); err != nil {
 		return domain.Inventory{}, err
@@ -383,6 +409,26 @@ func (f *FandangoLocal) GetAvailability(ctx context.Context, showtime domain.Sho
 	f.cacheMu.Unlock()
 	f.markSuccess()
 	return inventory, nil
+}
+
+func (f *FandangoLocal) beginInventoryRead(key string) (*fandangoInventoryRead, bool) {
+	f.flightMu.Lock()
+	defer f.flightMu.Unlock()
+	if read, ok := f.inventoryReads[key]; ok {
+		return read, false
+	}
+	read := &fandangoInventoryRead{done: make(chan struct{})}
+	f.inventoryReads[key] = read
+	return read, true
+}
+
+func (f *FandangoLocal) finishInventoryRead(key string, read *fandangoInventoryRead, inventory domain.Inventory, err error) {
+	f.flightMu.Lock()
+	read.inventory = cloneInventory(inventory)
+	read.err = err
+	delete(f.inventoryReads, key)
+	close(read.done)
+	f.flightMu.Unlock()
 }
 
 func (f *FandangoLocal) getJSON(ctx context.Context, path string, query url.Values, destination any) error {
@@ -648,6 +694,9 @@ func normalizeFandangoShowtimes(response fandangoShowtimeGroupingsResponse, movi
 		for _, variant := range theater.Variants {
 			for _, group := range variant.AmenityGroups {
 				attributes := []string{variant.FilmFormatHeader, group.AmenityString}
+				if group.HasReservedSeating {
+					attributes = append(attributes, "reserved seating")
+				}
 				for _, amenity := range theater.Amenities {
 					attributes = append(attributes, amenity.Name)
 				}
@@ -662,10 +711,13 @@ func normalizeFandangoShowtimes(response fandangoShowtimeGroupingsResponse, movi
 					if err != nil {
 						continue
 					}
+					formatAttributes := []string{variant.FilmFormatHeader}
+					formatAttributes = append(formatAttributes, fandangoFilmFormatNames(source.FilmFormat)...)
+					formatAttributes = append(formatAttributes, source.Type)
 					showtimeAttributes := append([]string(nil), attributes...)
-					showtimeAttributes = append(showtimeAttributes, fandangoFilmFormatNames(source.FilmFormat)...)
-					showtimeAttributes = append(showtimeAttributes, source.Type)
-					format, amenities, captions, audio := classifyAttributes(showtimeAttributes, false)
+					showtimeAttributes = append(showtimeAttributes, formatAttributes...)
+					format, _, _, _ := classifyAttributes(formatAttributes, false)
+					_, amenities, captions, audio := classifyAttributes(showtimeAttributes, false)
 					reserved := group.HasReservedSeating && validFandangoOpaqueID(source.ShowtimeHashCode)
 					id := strings.Trim(string(source.ID), `" `)
 					if id == "" {

@@ -748,7 +748,7 @@ func classifyAttributes(values []string, requires3D bool) (string, []string, str
 			break
 		}
 	}
-	if requires3D || strings.Contains(joined, "reald3d") || strings.Contains(joined, "real d 3d") {
+	if requires3D || strings.Contains(joined, "reald3d") || strings.Contains(joined, "real d 3d") || strings.Contains(" "+joined+" ", " 3d ") {
 		format = "3d"
 	}
 	amenities := []string{}

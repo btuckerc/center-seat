@@ -3,6 +3,7 @@ package ranking
 import (
 	"fmt"
 	"math"
+	"strings"
 	"testing"
 	"time"
 
@@ -114,13 +115,104 @@ func TestDeadCenterFallsBackWhenEntireCenterZoneIsUnavailable(t *testing.T) {
 	if !ok {
 		t.Fatal("expected closest available fallback")
 	}
-	if len(recommendation.SeatOptions) != 1 || recommendation.SeatOptions[0].ID != recommendation.Seats[0].ID {
-		t.Fatalf("expected the ranked fallback as the only option, got %#v", recommendation.SeatOptions)
+	if len(recommendation.SeatOptions) != 2 || recommendation.SeatOptions[0].ID != recommendation.Seats[0].ID {
+		t.Fatalf("expected both equally strong fallbacks with the winner first, got %#v", recommendation.SeatOptions)
 	}
 	if len(recommendation.SeatMap.RecommendedZone) != 4 {
 		t.Fatalf("expected the unavailable four-seat ideal zone to remain visible, got %v", recommendation.SeatMap.RecommendedZone)
 	}
-	if got := recommendation.Explanation[0]; got != recommendation.Seats[0].Label+" is the closest available seat; all 4 geometric center-zone positions are unavailable" {
+	if got := recommendation.Explanation[0]; got != "C4 and C9 are the closest available fallbacks; all 4 geometric center positions are unavailable" {
 		t.Fatalf("unexpected explanation: %q", got)
+	}
+	if recommendation.ProfileMatch != "closest_fallback" {
+		t.Fatalf("expected an explicit fallback classification, got %q", recommendation.ProfileMatch)
+	}
+}
+
+func TestTwoThirdsBackStaysInPreferredDepthWhenEligibleSeatsExist(t *testing.T) {
+	inventory := domain.Inventory{Confidence: "exact_coordinates", ObservedAt: time.Now(), Seats: []domain.Seat{
+		{ID: "D16", Label: "D16", Row: "D", Index: 15, X: .485, Y: .267, Type: "recliner", Status: "available"},
+		{ID: "G8", Label: "G8", Row: "G", Index: 7, X: .50, Y: .534, Type: "recliner", Status: "available"},
+		{ID: "G9", Label: "G9", Row: "G", Index: 8, X: .55, Y: .534, Type: "recliner", Status: "available"},
+		{ID: "H16", Label: "H16", Row: "H", Index: 15, X: .50, Y: .630, Type: "recliner", Status: "sold"},
+		{ID: "I5", Label: "I5", Row: "I", Index: 4, X: .49, Y: .720, Type: "recliner", Status: "available"},
+	}}
+	recommendation, ok := BestBlock(domain.Showtime{ID: "odyssey"}, inventory, domain.QueryRequest{
+		TicketCount: 1, SeatProfile: "two_thirds_back",
+	})
+	if !ok {
+		t.Fatal("expected a recommendation")
+	}
+	if recommendation.Seats[0].ID == "D16" || recommendation.Seats[0].Y < .50 || recommendation.Seats[0].Y > .78 {
+		t.Fatalf("expected a seat in the 2/3-back depth zone, got %#v", recommendation.Seats[0])
+	}
+	if recommendation.ProfileMatch != "preferred_zone" {
+		t.Fatalf("expected preferred-zone classification, got %q", recommendation.ProfileMatch)
+	}
+	if recommendation.SeatMap == nil || recommendation.SeatMap.PreferredDepth == nil || recommendation.SeatMap.PreferredDepth.Minimum != .50 || recommendation.SeatMap.PreferredDepth.Maximum != .78 {
+		t.Fatalf("missing preferred-depth metadata: %#v", recommendation.SeatMap)
+	}
+	if len(recommendation.SeatOptions) < 2 {
+		t.Fatalf("expected multiple strong available choices, got %#v", recommendation.SeatOptions)
+	}
+}
+
+func TestTwoThirdsBackLabelsFallbackWhenPreferredDepthIsSoldOut(t *testing.T) {
+	inventory := domain.Inventory{Confidence: "exact_coordinates", ObservedAt: time.Now(), Seats: []domain.Seat{
+		{ID: "D16", Label: "D16", Row: "D", Index: 15, X: .485, Y: .267, Type: "recliner", Status: "available"},
+		{ID: "H16", Label: "H16", Row: "H", Index: 15, X: .50, Y: .630, Type: "recliner", Status: "sold"},
+	}}
+	recommendation, ok := BestBlock(domain.Showtime{ID: "odyssey"}, inventory, domain.QueryRequest{
+		TicketCount: 1, SeatProfile: "two_thirds_back",
+	})
+	if !ok {
+		t.Fatal("expected the closest available fallback")
+	}
+	if recommendation.Seats[0].ID != "D16" || recommendation.ProfileMatch != "closest_fallback" {
+		t.Fatalf("expected D16 as an explicit fallback, got %#v", recommendation)
+	}
+	if !strings.Contains(recommendation.Explanation[0], "no eligible seat remained") {
+		t.Fatalf("fallback was not explained: %q", recommendation.Explanation[0])
+	}
+}
+
+func TestCustomZoneMapsNormalizedAreaOntoAuditoriumGeometry(t *testing.T) {
+	zone := domain.SeatZone{MinimumX: .62, MaximumX: .95, MinimumY: .62, MaximumY: .92}
+	inventory := domain.Inventory{Confidence: "exact_coordinates", ObservedAt: time.Now(), Seats: []domain.Seat{
+		{ID: "center", Label: "E8", Row: "E", Index: 7, X: .50, Y: .50, Type: "recliner", Status: "available"},
+		{ID: "custom", Label: "H13", Row: "H", Index: 12, X: .78, Y: .78, Type: "recliner", Status: "available"},
+		{ID: "edge", Label: "J15", Row: "J", Index: 14, X: .94, Y: .94, Type: "recliner", Status: "available"},
+	}}
+	recommendation, ok := BestBlock(domain.Showtime{ID: "custom-zone"}, inventory, domain.QueryRequest{
+		TicketCount: 1, SeatProfile: "custom", CustomSeatZone: &zone,
+	})
+	if !ok {
+		t.Fatal("expected a custom-zone recommendation")
+	}
+	if recommendation.Seats[0].ID != "custom" || recommendation.ProfileMatch != "preferred_zone" {
+		t.Fatalf("expected the seat inside the drawn zone, got %#v", recommendation)
+	}
+	if recommendation.SeatMap == nil || recommendation.SeatMap.PreferredZone == nil {
+		t.Fatal("expected custom zone metadata on the seat map")
+	}
+	if math.Abs(recommendation.SeatMap.Target.X-.785) > 1e-9 || math.Abs(recommendation.SeatMap.Target.Y-.77) > 1e-9 {
+		t.Fatalf("custom target did not use the selected zone center: %#v", recommendation.SeatMap.Target)
+	}
+}
+
+func TestCustomZoneLabelsNearestFallbackWhenSelectedAreaIsUnavailable(t *testing.T) {
+	zone := domain.SeatZone{MinimumX: .4, MaximumX: .6, MinimumY: .6, MaximumY: .8}
+	inventory := domain.Inventory{Confidence: "exact_coordinates", ObservedAt: time.Now(), Seats: []domain.Seat{
+		{ID: "sold", Label: "H8", Row: "H", Index: 7, X: .50, Y: .70, Type: "recliner", Status: "sold"},
+		{ID: "fallback", Label: "G8", Row: "G", Index: 7, X: .50, Y: .52, Type: "recliner", Status: "available"},
+	}}
+	recommendation, ok := BestBlock(domain.Showtime{ID: "custom-fallback"}, inventory, domain.QueryRequest{
+		TicketCount: 1, SeatProfile: "custom", CustomSeatZone: &zone,
+	})
+	if !ok {
+		t.Fatal("expected a nearest fallback")
+	}
+	if recommendation.Seats[0].ID != "fallback" || recommendation.ProfileMatch != "closest_fallback" {
+		t.Fatalf("expected an explicit fallback outside the unavailable zone, got %#v", recommendation)
 	}
 }

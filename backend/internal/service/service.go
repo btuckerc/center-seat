@@ -7,7 +7,6 @@ import (
 	"math"
 	"sort"
 	"strings"
-	"sync"
 	"time"
 
 	"centerseat/backend/internal/domain"
@@ -21,18 +20,15 @@ type Service struct {
 	fanout    int
 }
 
-const (
-	adaptiveInitialCandidates = 4
-	adaptiveExpansionBatch    = 4
-	adaptiveMinimumFresh      = 4
-	adaptiveMinimumResults    = 2
-	adaptiveStrongScore       = 92.0
-)
+const adaptiveInitialCandidates = 4
 
 type inventoryCandidateResult struct {
+	index          int
 	recommendation domain.Recommendation
 	outcome        string
 	failureReason  string
+	dateKey        string
+	upperBound     float64
 }
 
 func New(discovery providers.Discovery, inventory providers.Inventory, fanout int) *Service {
@@ -103,52 +99,96 @@ func (s *Service) Query(ctx context.Context, queryID string, q domain.QueryReque
 	if err := q.Validate(); err != nil {
 		return domain.QueryResponse{}, err
 	}
+	discoveryStarted := time.Now()
 	discoveryCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
 	showtimes, err := s.discovery.Discover(discoveryCtx, q)
 	cancel()
 	if err != nil {
 		return domain.QueryResponse{}, fmt.Errorf("discover showtimes: %w", err)
 	}
-	filtered := filterAndPrune(showtimes, q)
+	eligibleShowtimes := filterAndPrune(showtimes, q)
 	coverage := domain.Coverage{
-		ScreeningsDiscovered: len(showtimes), ScreeningsPruned: len(filtered),
-		InventoryFailureReasons: map[string]int{},
+		DatesRequested: dateRangeDays(q.Dates), DatesWithScreenings: distinctShowtimeDates(eligibleShowtimes, q),
+		ScreeningsDiscovered: len(showtimes), ScreeningsPruned: len(eligibleShowtimes),
+		InventoryFailureReasons: map[string]int{}, DiscoveryMS: int(time.Since(discoveryStarted).Milliseconds()),
 	}
-	if len(filtered) == 0 {
+	if len(eligibleShowtimes) == 0 {
 		now := time.Now().UTC()
 		coverage.ElapsedMS = int(time.Since(started).Milliseconds())
 		return domain.QueryResponse{QueryID: queryID, Status: "no_match", GeneratedAt: now, ExpiresAt: now.Add(30 * time.Second), Coverage: coverage, Alternatives: []domain.Recommendation{}, Warnings: []string{"No screenings matched every hard constraint"}}, nil
 	}
+	candidates := eligibleShowtimes
+	if len(candidates) > q.CandidateLimit {
+		candidates = candidates[:q.CandidateLimit]
+	}
 
-	recommendations := make([]domain.Recommendation, 0, len(filtered))
-	for offset, batchSize := 0, adaptiveInitialCandidates; offset < len(filtered); batchSize = adaptiveExpansionBatch {
-		end := offset + batchSize
-		if end > len(filtered) {
-			end = len(filtered)
+	recommendations := make([]domain.Recommendation, 0, len(candidates))
+	dateTargets := minimumDateCoverage(eligibleShowtimes, q, 2)
+	successfulByDate := map[string]int{}
+	failedUpperBounds := make([]float64, 0)
+	processed := make([]bool, len(eligibleShowtimes))
+	inventoryStarted := time.Now()
+	pipelineCtx, stopPipeline := context.WithCancel(ctx)
+	results := make(chan inventoryCandidateResult, len(candidates))
+	next, inFlight := 0, 0
+	schedule := func() {
+		index := next
+		next++
+		inFlight++
+		go func() { results <- s.evaluateInventoryCandidate(pipelineCtx, index, candidates[index], q) }()
+	}
+	initial := adaptiveInitialCandidates
+	if initial > len(candidates) {
+		initial = len(candidates)
+	}
+	for next < initial {
+		schedule()
+	}
+	expanded := false
+	for inFlight > 0 {
+		candidate := <-results
+		inFlight--
+		processed[candidate.index] = true
+		coverage.InventoriesChecked++
+		switch candidate.outcome {
+		case "failed":
+			coverage.InventoriesFailed++
+			coverage.InventoryFailureReasons[candidate.failureReason]++
+			failedUpperBounds = append(failedUpperBounds, candidate.upperBound)
+		case "not_available":
+			successfulByDate[candidate.dateKey]++
+			coverage.ScreeningsUnavailable++
+		case "price_rejected":
+			coverage.InventoriesFresh++
+			successfulByDate[candidate.dateKey]++
+			coverage.ScreeningsPriceRejected++
+		case "unavailable":
+			coverage.InventoriesFresh++
+			successfulByDate[candidate.dateKey]++
+			coverage.ScreeningsUnavailable++
+		case "recommended":
+			coverage.InventoriesFresh++
+			successfulByDate[candidate.dateKey]++
+			recommendations = append(recommendations, candidate.recommendation)
 		}
-		for _, candidate := range s.evaluateInventoryBatch(ctx, filtered[offset:end], q) {
-			coverage.InventoriesChecked++
-			switch candidate.outcome {
-			case "failed":
-				coverage.InventoriesFailed++
-				coverage.InventoryFailureReasons[candidate.failureReason]++
-			case "price_rejected":
-				coverage.InventoriesFresh++
-				coverage.ScreeningsPriceRejected++
-			case "unavailable":
-				coverage.InventoriesFresh++
-				coverage.ScreeningsUnavailable++
-			case "recommended":
-				coverage.InventoriesFresh++
-				recommendations = append(recommendations, candidate.recommendation)
-			}
-		}
-		sort.Slice(recommendations, func(i, j int) bool { return recommendations[i].Score > recommendations[j].Score })
-		offset = end
-		if adaptiveCoverageIsStrong(coverage, recommendations) {
+		coverage.DatesCompared = len(successfulByDate)
+		sortRecommendations(recommendations)
+		remaining := unprocessedShowtimes(eligibleShowtimes, processed)
+		if adaptiveCoverageIsConclusive(coverage, recommendations, dateCoverageSatisfied(successfulByDate, dateTargets), remaining, failedUpperBounds, q) {
+			stopPipeline()
 			break
 		}
+		if !expanded && inFlight == 0 {
+			expanded = true
+		}
+		if expanded && pipelineCtx.Err() == nil {
+			for next < len(candidates) && inFlight < s.fanout {
+				schedule()
+			}
+		}
 	}
+	stopPipeline()
+	coverage.InventoryMS = int(time.Since(inventoryStarted).Milliseconds())
 	coverage.ProvidersDegraded = coverage.InventoriesFailed
 	status := "complete"
 	warnings := []string{}
@@ -163,7 +203,15 @@ func (s *Service) Query(ctx context.Context, queryID string, q domain.QueryReque
 
 	// Re-read the winner without holding a seat. If it changed, discard it and
 	// promote the next ranked candidate through the same final check.
+	verificationStarted := time.Now()
+	verifiedShowtimes := map[string]bool{}
 	for len(recommendations) > 0 {
+		sortRecommendations(recommendations)
+		winnerID := recommendations[0].Showtime.ID
+		if verifiedShowtimes[winnerID] {
+			coverage.WinnerVerified = true
+			break
+		}
 		verifyCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 		fresh, err := s.inventory.GetAvailability(verifyCtx, recommendations[0].Showtime, true)
 		cancel()
@@ -186,18 +234,31 @@ func (s *Service) Query(ctx context.Context, queryID string, q domain.QueryReque
 		}
 		verified.Score = combinedScore(verified.Score, verified.Showtime, q)
 		recommendations[0] = verified
-		coverage.WinnerVerified = true
-		break
+		verifiedShowtimes[winnerID] = true
+		sortRecommendations(recommendations)
+		if recommendations[0].Showtime.ID == winnerID {
+			coverage.WinnerVerified = true
+			break
+		}
+		warnings = append(warnings, fmt.Sprintf("%s changed rank during final verification, so the new leader was checked too", verified.Showtime.VenueName))
 	}
 	if len(recommendations) == 0 {
 		status = "no_match"
 		warnings = append(warnings, "No screening remained eligible after final live verification")
 	}
-	if coverage.InventoriesFailed > 0 && !adaptiveResultIsReliable(coverage, recommendations) {
+	coverage.VerificationMS = int(time.Since(verificationStarted).Milliseconds())
+	remaining := unprocessedShowtimes(eligibleShowtimes, processed)
+	coverage.RangeBestProven = coverage.WinnerVerified && adaptiveCoverageIsConclusive(coverage, recommendations, dateCoverageSatisfied(successfulByDate, dateTargets), remaining, failedUpperBounds, q)
+	if !coverage.RangeBestProven && len(recommendations) > 0 {
 		if status != "no_match" {
 			status = "partial"
 		}
-		warnings = append(warnings, inventoryFailureWarning())
+		remainingCount := len(remaining)
+		if coverage.InventoriesFailed > 0 {
+			warnings = append(warnings, inventoryFailureWarning())
+		} else if remainingCount > 0 {
+			warnings = append(warnings, fmt.Sprintf("This is the best of %d live screenings compared, but %d additional matching screenings could not be ruled out within the automatic safety limit", coverage.InventoriesFresh, remainingCount))
+		}
 	}
 
 	now := time.Now().UTC()
@@ -222,62 +283,81 @@ func (s *Service) Query(ctx context.Context, queryID string, q domain.QueryReque
 	return response, nil
 }
 
-func (s *Service) evaluateInventoryBatch(ctx context.Context, showtimes []domain.Showtime, q domain.QueryRequest) []inventoryCandidateResult {
-	results := make(chan inventoryCandidateResult, len(showtimes))
-	sem := make(chan struct{}, s.fanout)
-	var wg sync.WaitGroup
-	for _, showtime := range showtimes {
-		if !s.inventory.Supports(showtime) {
-			continue
+func sortRecommendations(recommendations []domain.Recommendation) {
+	sort.SliceStable(recommendations, func(i, j int) bool {
+		if recommendations[i].Score != recommendations[j].Score {
+			return recommendations[i].Score > recommendations[j].Score
 		}
-		wg.Add(1)
-		go func(st domain.Showtime) {
-			defer wg.Done()
-			select {
-			case sem <- struct{}{}:
-			case <-ctx.Done():
-				results <- inventoryCandidateResult{outcome: "failed", failureReason: inventoryFailureReason(ctx.Err())}
-				return
-			}
-			defer func() { <-sem }()
-			inventoryCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-			defer cancel()
-			inventory, err := s.inventory.GetAvailability(inventoryCtx, st, false)
-			if err != nil {
-				results <- inventoryCandidateResult{outcome: "failed", failureReason: inventoryFailureReason(err)}
-				return
-			}
-			st, ok := applyInventoryPricing(st, inventory, q)
-			if !ok {
-				results <- inventoryCandidateResult{outcome: "price_rejected"}
-				return
-			}
-			recommendation, ok := ranking.BestBlock(st, inventory, q)
-			if !ok {
-				results <- inventoryCandidateResult{outcome: "unavailable"}
-				return
-			}
-			recommendation.Score = combinedScore(recommendation.Score, st, q)
-			results <- inventoryCandidateResult{recommendation: recommendation, outcome: "recommended"}
-		}(showtime)
-	}
-	wg.Wait()
-	close(results)
-	batch := make([]inventoryCandidateResult, 0, len(showtimes))
-	for candidate := range results {
-		batch = append(batch, candidate)
-	}
-	return batch
+		if !recommendations[i].Showtime.StartsAt.Equal(recommendations[j].Showtime.StartsAt) {
+			return recommendations[i].Showtime.StartsAt.Before(recommendations[j].Showtime.StartsAt)
+		}
+		return recommendations[i].Showtime.ID < recommendations[j].Showtime.ID
+	})
 }
 
-func adaptiveCoverageIsStrong(coverage domain.Coverage, recommendations []domain.Recommendation) bool {
-	return coverage.InventoriesFresh >= adaptiveMinimumFresh &&
-		len(recommendations) >= adaptiveMinimumResults &&
-		recommendations[0].Score >= adaptiveStrongScore
+func unprocessedShowtimes(showtimes []domain.Showtime, processed []bool) []domain.Showtime {
+	remaining := make([]domain.Showtime, 0, len(showtimes))
+	for index, showtime := range showtimes {
+		if index >= len(processed) || !processed[index] {
+			remaining = append(remaining, showtime)
+		}
+	}
+	return remaining
 }
 
-func adaptiveResultIsReliable(coverage domain.Coverage, recommendations []domain.Recommendation) bool {
-	return coverage.WinnerVerified && adaptiveCoverageIsStrong(coverage, recommendations)
+func (s *Service) evaluateInventoryCandidate(ctx context.Context, index int, showtime domain.Showtime, q domain.QueryRequest) inventoryCandidateResult {
+	date := showtimeDateKey(showtime.StartsAt, q)
+	base := inventoryCandidateResult{index: index, dateKey: date, upperBound: maximumPossibleScore(showtime, q)}
+	if !s.inventory.Supports(showtime) {
+		base.outcome = "failed"
+		base.failureReason = "provider_error"
+		return base
+	}
+	inventoryCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	inventory, err := s.inventory.GetAvailability(inventoryCtx, showtime, false)
+	if err != nil {
+		reason := inventoryFailureReason(err)
+		if reason == "not_available" {
+			base.outcome = "not_available"
+			return base
+		}
+		base.outcome = "failed"
+		base.failureReason = reason
+		return base
+	}
+	showtime, ok := applyInventoryPricing(showtime, inventory, q)
+	if !ok {
+		base.outcome = "price_rejected"
+		return base
+	}
+	recommendation, ok := ranking.BestBlock(showtime, inventory, q)
+	if !ok {
+		base.outcome = "unavailable"
+		return base
+	}
+	recommendation.Score = combinedScore(recommendation.Score, showtime, q)
+	base.recommendation = recommendation
+	base.outcome = "recommended"
+	return base
+}
+
+func adaptiveCoverageIsConclusive(coverage domain.Coverage, recommendations []domain.Recommendation, dateCoverageComplete bool, unchecked []domain.Showtime, failedUpperBounds []float64, q domain.QueryRequest) bool {
+	if !dateCoverageComplete || coverage.InventoriesFresh == 0 || len(recommendations) == 0 {
+		return false
+	}
+	best := recommendations[0].Score
+	for _, showtime := range unchecked {
+		if maximumPossibleScore(showtime, q) > best {
+			return false
+		}
+	}
+	for _, upperBound := range failedUpperBounds {
+		if upperBound > best {
+			return false
+		}
+	}
+	return true
 }
 
 func inventoryFailureReason(err error) string {
@@ -332,6 +412,7 @@ func (s *Service) Showtimes(ctx context.Context, queryID string, q domain.QueryR
 	if err := q.Validate(); err != nil {
 		return domain.ShowtimeQueryResponse{}, err
 	}
+	discoveryStarted := time.Now()
 	discoveryCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
 	showtimes, err := s.discovery.Discover(discoveryCtx, q)
 	cancel()
@@ -339,6 +420,9 @@ func (s *Service) Showtimes(ctx context.Context, queryID string, q domain.QueryR
 		return domain.ShowtimeQueryResponse{}, fmt.Errorf("discover showtimes: %w", err)
 	}
 	filtered := filterShowtimes(showtimes, q, false)
+	if len(filtered) > q.CandidateLimit {
+		filtered = filtered[:q.CandidateLimit]
+	}
 	now := time.Now().UTC()
 	status := "complete"
 	warnings := []string{"Showtime-only queries do not claim per-seat availability; use the seat-query endpoint when live inventory is connected"}
@@ -349,8 +433,11 @@ func (s *Service) Showtimes(ctx context.Context, queryID string, q domain.QueryR
 	return domain.ShowtimeQueryResponse{
 		QueryID: queryID, Status: status, GeneratedAt: now, ExpiresAt: now.Add(5 * time.Minute),
 		Coverage: domain.Coverage{
+			DatesRequested:       dateRangeDays(q.Dates),
+			DatesWithScreenings:  distinctShowtimeDates(filtered, q),
 			ScreeningsDiscovered: len(showtimes), ScreeningsPruned: len(filtered),
 			InventoryFailureReasons: map[string]int{},
+			DiscoveryMS:             int(time.Since(discoveryStarted).Milliseconds()),
 			ElapsedMS:               int(time.Since(started).Milliseconds()),
 		},
 		Showtimes: filtered, Warnings: warnings,
@@ -392,13 +479,110 @@ func filterShowtimes(showtimes []domain.Showtime, q domain.QueryRequest, require
 		}
 		result = append(result, st)
 	}
-	sort.Slice(result, func(i, j int) bool {
-		return preliminaryScore(result[i], q) > preliminaryScore(result[j], q)
-	})
-	if len(result) > q.CandidateLimit {
-		result = result[:q.CandidateLimit]
+	return orderShowtimesAcrossDates(result, q)
+}
+
+func orderShowtimesAcrossDates(showtimes []domain.Showtime, q domain.QueryRequest) []domain.Showtime {
+	buckets := map[string][]domain.Showtime{}
+	keys := make([]string, 0)
+	for _, showtime := range showtimes {
+		key := showtimeDateKey(showtime.StartsAt, q)
+		if _, ok := buckets[key]; !ok {
+			keys = append(keys, key)
+		}
+		buckets[key] = append(buckets[key], showtime)
 	}
-	return result
+	sort.Strings(keys)
+	for _, key := range keys {
+		bucket := buckets[key]
+		sort.SliceStable(bucket, func(i, j int) bool {
+			left, right := preliminaryScore(bucket[i], q), preliminaryScore(bucket[j], q)
+			if left != right {
+				return left > right
+			}
+			if !bucket[i].StartsAt.Equal(bucket[j].StartsAt) {
+				return bucket[i].StartsAt.Before(bucket[j].StartsAt)
+			}
+			return bucket[i].ID < bucket[j].ID
+		})
+		buckets[key] = bucket
+	}
+	ordered := make([]domain.Showtime, 0, len(showtimes))
+	const dateCoverageRounds = 2
+	for round := 0; round < dateCoverageRounds; round++ {
+		for _, key := range keys {
+			if round < len(buckets[key]) {
+				ordered = append(ordered, buckets[key][round])
+			}
+		}
+	}
+	remaining := make([]domain.Showtime, 0, len(showtimes)-len(ordered))
+	for _, key := range keys {
+		bucket := buckets[key]
+		if len(bucket) > dateCoverageRounds {
+			remaining = append(remaining, bucket[dateCoverageRounds:]...)
+		}
+	}
+	sort.SliceStable(remaining, func(i, j int) bool {
+		left, right := maximumPossibleScore(remaining[i], q), maximumPossibleScore(remaining[j], q)
+		if left != right {
+			return left > right
+		}
+		if !remaining[i].StartsAt.Equal(remaining[j].StartsAt) {
+			return remaining[i].StartsAt.Before(remaining[j].StartsAt)
+		}
+		return remaining[i].ID < remaining[j].ID
+	})
+	ordered = append(ordered, remaining...)
+	return ordered
+}
+
+func showtimeDateKey(startsAt time.Time, q domain.QueryRequest) string {
+	if q.Time.Timezone != "" {
+		if location, err := time.LoadLocation(q.Time.Timezone); err == nil {
+			startsAt = startsAt.In(location)
+		}
+	}
+	return startsAt.Format(time.DateOnly)
+}
+
+func distinctShowtimeDates(showtimes []domain.Showtime, q domain.QueryRequest) int {
+	dates := map[string]bool{}
+	for _, showtime := range showtimes {
+		dates[showtimeDateKey(showtime.StartsAt, q)] = true
+	}
+	return len(dates)
+}
+
+func minimumDateCoverage(showtimes []domain.Showtime, q domain.QueryRequest, perDate int) map[string]int {
+	counts := map[string]int{}
+	for _, showtime := range showtimes {
+		counts[showtimeDateKey(showtime.StartsAt, q)]++
+	}
+	for date, count := range counts {
+		if count > perDate {
+			counts[date] = perDate
+		}
+	}
+	return counts
+}
+
+func dateCoverageSatisfied(successful, targets map[string]int) bool {
+	for date, target := range targets {
+		if successful[date] < target {
+			return false
+		}
+	}
+	return true
+}
+
+func dateRangeDays(dates domain.DateConstraint) int {
+	start, startErr := time.Parse(time.DateOnly, dates.Start)
+	end, endErr := time.Parse(time.DateOnly, dates.End)
+	if startErr != nil || endErr != nil || end.Before(start) {
+		return 0
+	}
+	return int(end.Sub(start)/(24*time.Hour)) + 1
 }
 
 func matchesTime(t time.Time, constraint domain.TimeConstraint) bool {
@@ -472,6 +656,10 @@ func combinedScore(seatScore float64, st domain.Showtime, q domain.QueryRequest)
 		result = 0
 	}
 	return float64(int(result*100+0.5)) / 100
+}
+
+func maximumPossibleScore(st domain.Showtime, q domain.QueryRequest) float64 {
+	return combinedScore(100, st, q)
 }
 
 func toSet(values []string) map[string]bool {

@@ -147,6 +147,29 @@ func TestQuerySeparatesMapFailuresFromValidExclusions(t *testing.T) {
 	}
 }
 
+func TestQueryTreatsProviderNotAvailableAsAConclusiveExclusion(t *testing.T) {
+	discovery := testfixtures.Provider{}
+	svc := New(discovery, goneInventory{base: discovery}, 6)
+	today := time.Now().Format(time.DateOnly)
+	result, err := svc.Query(context.Background(), "qry_gone", domain.QueryRequest{
+		MovieQuery: "The Test Film",
+		Location: domain.LocationConstraint{
+			Query: "28202", Latitude: 35.2271, Longitude: -80.8431, RadiusMiles: 25,
+		},
+		Dates: domain.DateConstraint{Start: today, End: today}, TicketCount: 1,
+		SeatProfile: "balanced", MaxDistanceMiles: 25, CandidateLimit: 12,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Coverage.ScreeningsUnavailable != 1 || result.Coverage.InventoriesFailed != 0 {
+		t.Fatalf("an explicit gone response should be an unavailable screening, not a provider failure: %#v", result.Coverage)
+	}
+	if !result.Coverage.RangeBestProven || result.Status != "complete" {
+		t.Fatalf("a screening known to be unavailable must not weaken the range claim: %#v", result)
+	}
+}
+
 func TestQueryPromotesNextCandidateWhenWinnerChangesDuringVerification(t *testing.T) {
 	discovery := testfixtures.Provider{}
 	svc := New(discovery, promotionInventory{base: discovery}, 4)
@@ -189,9 +212,12 @@ func TestQueryStopsAfterAutomaticInitialCoverageWhenResultIsStrong(t *testing.T)
 	if provider.initialReads.Load() != adaptiveInitialCandidates {
 		t.Fatalf("expected %d initial provider reads, got %d", adaptiveInitialCandidates, provider.initialReads.Load())
 	}
+	if !result.Coverage.RangeBestProven {
+		t.Fatal("expected the unchecked screenings to be safely ruled out")
+	}
 }
 
-func TestQueryAutomaticallyExpandsAndRecoversFromStaleCandidates(t *testing.T) {
+func TestQueryExpandsAfterStaleCandidatesAndKeepsTheRangeClaimHonest(t *testing.T) {
 	provider := &adaptiveTestProvider{failInitialBatch: true}
 	svc := New(provider, provider, 8)
 	result, err := svc.Query(context.Background(), "qry_adaptive_expand", adaptiveTestQuery())
@@ -201,18 +227,87 @@ func TestQueryAutomaticallyExpandsAndRecoversFromStaleCandidates(t *testing.T) {
 	if result.Winner == nil || !result.Coverage.WinnerVerified {
 		t.Fatalf("expected expansion to recover a verified winner, got %#v", result)
 	}
-	expected := adaptiveInitialCandidates + adaptiveExpansionBatch
-	if result.Coverage.InventoriesChecked != expected || result.Coverage.InventoriesFailed != adaptiveInitialCandidates {
-		t.Fatalf("expected one automatic expansion after the stale batch, got %#v", result.Coverage)
+	if result.Coverage.InventoriesChecked != 18 || result.Coverage.InventoriesFailed != adaptiveInitialCandidates {
+		t.Fatalf("expected every remaining candidate to be checked after the leading failures, got %#v", result.Coverage)
 	}
-	if result.Status != "complete" || len(result.Warnings) != 0 {
-		t.Fatalf("recovered, verified searches should stay out of the user's way: %#v", result)
+	if result.Status != "partial" || result.Coverage.RangeBestProven || len(result.Warnings) == 0 {
+		t.Fatalf("unread high-potential screenings must prevent a best-across-range claim: %#v", result)
+	}
+}
+
+func TestQueryDoesNotStopAtAnArbitraryHighScore(t *testing.T) {
+	provider := &adaptiveTestProvider{allCompetitive: true}
+	svc := New(provider, provider, 8)
+	result, err := svc.Query(context.Background(), "qry_adaptive_proof", adaptiveTestQuery())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Coverage.InventoriesChecked != 18 {
+		t.Fatalf("expected every still-competitive screening to be compared, got %#v", result.Coverage)
+	}
+	if !result.Coverage.RangeBestProven {
+		t.Fatal("expected a proven range winner after all competitive screenings were compared")
+	}
+}
+
+func TestQueryCoversEveryDateBeforeStoppingEarly(t *testing.T) {
+	provider := &adaptiveTestProvider{days: 3}
+	svc := New(provider, provider, 8)
+	query := adaptiveTestQuery()
+	start, err := time.Parse(time.DateOnly, query.Dates.Start)
+	if err != nil {
+		t.Fatal(err)
+	}
+	query.Dates.End = start.AddDate(0, 0, 2).Format(time.DateOnly)
+	result, err := svc.Query(context.Background(), "qry_dates", query)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Coverage.DatesRequested != 3 || result.Coverage.DatesWithScreenings != 3 || result.Coverage.DatesCompared != 3 {
+		t.Fatalf("expected all three requested dates to be represented, got %#v", result.Coverage)
+	}
+	if result.Coverage.InventoriesChecked < 6 || result.Coverage.InventoriesChecked > 12 {
+		t.Fatalf("expected at least two live comparisons per date before stopping, got %#v", result.Coverage)
+	}
+	if !result.Coverage.RangeBestProven {
+		t.Fatal("expected a proven winner across all represented dates")
+	}
+}
+
+func TestShowtimeOrderingRoundRobinsAcrossDates(t *testing.T) {
+	query := adaptiveTestQuery()
+	query.Time.Timezone = "UTC"
+	start, err := time.Parse(time.DateOnly, query.Dates.Start)
+	if err != nil {
+		t.Fatal(err)
+	}
+	showtimes := make([]domain.Showtime, 0, 6)
+	for date := 0; date < 3; date++ {
+		for screening := 0; screening < 2; screening++ {
+			showtimes = append(showtimes, domain.Showtime{
+				ID:            fmt.Sprintf("date-%d-screening-%d", date, screening),
+				StartsAt:      start.AddDate(0, 0, date).Add(time.Duration(18+screening) * time.Hour),
+				DistanceMiles: float64(screening + 1), Format: "standard",
+			})
+		}
+	}
+	ordered := orderShowtimesAcrossDates(showtimes, query)
+	for offset := 0; offset < 6; offset += 3 {
+		dates := map[string]bool{}
+		for _, showtime := range ordered[offset : offset+3] {
+			dates[showtimeDateKey(showtime.StartsAt, query)] = true
+		}
+		if len(dates) != 3 {
+			t.Fatalf("round %d did not represent every date: %#v", offset/3+1, ordered[offset:offset+3])
+		}
 	}
 }
 
 type adaptiveTestProvider struct {
 	initialReads     atomic.Int32
 	failInitialBatch bool
+	allCompetitive   bool
+	days             int
 }
 
 func (*adaptiveTestProvider) Name() string { return "adaptive-test" }
@@ -221,17 +316,29 @@ func (*adaptiveTestProvider) Supports(domain.Showtime) bool { return true }
 
 func (*adaptiveTestProvider) MaxConcurrentInventoryReads() int { return 4 }
 
-func (*adaptiveTestProvider) Discover(_ context.Context, query domain.QueryRequest) ([]domain.Showtime, error) {
+func (provider *adaptiveTestProvider) Discover(_ context.Context, query domain.QueryRequest) ([]domain.Showtime, error) {
 	day, err := time.Parse(time.DateOnly, query.Dates.Start)
 	if err != nil {
 		return nil, err
 	}
 	showtimes := make([]domain.Showtime, 0, 18)
+	days := provider.days
+	if days < 1 {
+		days = 1
+	}
 	for index := 0; index < 18; index++ {
+		closeCandidates := 4
+		if provider.failInitialBatch {
+			closeCandidates = 8
+		}
+		distance := 24.0
+		if provider.allCompetitive || index < closeCandidates {
+			distance = 1 + float64(index)/100
+		}
 		showtimes = append(showtimes, domain.Showtime{
 			ID: fmt.Sprintf("adaptive-%02d", index), MovieTitle: query.MovieQuery,
-			VenueName: "Adaptive Cinema", StartsAt: day.Add(20*time.Hour + time.Duration(index)*time.Minute),
-			Format: "dolby", DistanceMiles: 1 + float64(index)/10, ReservedSeating: true,
+			VenueName: "Adaptive Cinema", StartsAt: day.AddDate(0, 0, index%days).Add(20*time.Hour + time.Duration(index/days)*time.Minute),
+			Format: "dolby", DistanceMiles: distance, ReservedSeating: true,
 			InventoryProvider: "test-fixture", Amenities: []string{"recliner", "reserved_seating"},
 		})
 	}
@@ -262,6 +369,10 @@ type diagnosticInventory struct {
 	base testfixtures.Provider
 }
 
+type goneInventory struct {
+	base testfixtures.Provider
+}
+
 type promotionInventory struct {
 	base testfixtures.Provider
 }
@@ -281,6 +392,17 @@ func (provider promotionInventory) GetAvailability(ctx context.Context, showtime
 }
 
 func (diagnosticInventory) Name() string { return "diagnostic-inventory" }
+
+func (goneInventory) Name() string { return "gone-inventory" }
+
+func (goneInventory) Supports(domain.Showtime) bool { return true }
+
+func (provider goneInventory) GetAvailability(ctx context.Context, showtime domain.Showtime, final bool) (domain.Inventory, error) {
+	if !final && showtime.ID == "fixture-0" {
+		return domain.Inventory{}, errors.New("Fandango read returned HTTP 410")
+	}
+	return provider.base.GetAvailability(ctx, showtime, final)
+}
 
 func (diagnosticInventory) Supports(domain.Showtime) bool { return true }
 

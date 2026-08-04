@@ -120,12 +120,22 @@ export async function queryOpenCinema(query: ShowtimeQuery): Promise<ShowtimeQue
     parameters.set("cursor", payload.pagination.next_cursor);
   }
 
-  const limit = Math.max(1, Math.min(query.candidate_limit ?? 18, 25));
-  const showtimes = discovered
-    .filter((screening) => matchesScreening(screening, query))
+  const start = new Date(`${query.dates.start}T00:00:00Z`);
+  const end = new Date(`${query.dates.end}T00:00:00Z`);
+  const dateSpan = Number.isFinite(start.valueOf()) && Number.isFinite(end.valueOf())
+    ? Math.max(1, Math.floor((end.valueOf() - start.valueOf()) / 86_400_000) + 1)
+    : 1;
+  const automaticLimit = Math.min(64, Math.max(18, dateSpan * 8));
+  const limit = Math.max(1, Math.min(query.candidate_limit ?? automaticLimit, 64));
+  const matched = discovered.filter((screening) => matchesScreening(screening, query));
+  const showtimes = matched
     .map(normalizeScreening)
     .sort((left, right) => left.starts_at.localeCompare(right.starts_at))
     .slice(0, limit);
+  const datesWithScreenings = new Set(matched.flatMap((screening) => {
+    const local = localParts(screening.start_time, screening.theater_timezone || query.time?.timezone);
+    return local ? [local.date] : [];
+  })).size;
   const now = new Date();
   return {
     query_id: `stq_${crypto.randomUUID().replaceAll("-", "")}`,
@@ -133,6 +143,10 @@ export async function queryOpenCinema(query: ShowtimeQuery): Promise<ShowtimeQue
     generated_at: now.toISOString(),
     expires_at: new Date(now.getTime() + 5 * 60_000).toISOString(),
     coverage: {
+      dates_requested: dateSpan,
+      dates_with_screenings: datesWithScreenings,
+      dates_compared: 0,
+      range_best_proven: false,
       screenings_discovered: discovered.length,
       screenings_pruned: showtimes.length,
       inventories_checked: 0,

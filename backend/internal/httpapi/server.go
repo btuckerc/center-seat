@@ -193,6 +193,17 @@ func (s *Server) createQuery(w http.ResponseWriter, r *http.Request) {
 	s.logger.Info("seat query evaluated",
 		"query_id", queryID,
 		"status", response.Status,
+		"movie_id", request.MovieID,
+		"date_start", request.Dates.Start,
+		"date_end", request.Dates.End,
+		"seat_profile", request.SeatProfile,
+		"ticket_count", request.TicketCount,
+		"time_mode", request.Time.Mode,
+		"formats", request.Formats,
+		"dates_requested", response.Coverage.DatesRequested,
+		"dates_with_screenings", response.Coverage.DatesWithScreenings,
+		"dates_compared", response.Coverage.DatesCompared,
+		"range_best_proven", response.Coverage.RangeBestProven,
 		"screenings_discovered", response.Coverage.ScreeningsDiscovered,
 		"candidates", response.Coverage.ScreeningsPruned,
 		"live_checks_completed", response.Coverage.InventoriesFresh,
@@ -201,6 +212,9 @@ func (s *Server) createQuery(w http.ResponseWriter, r *http.Request) {
 		"price_rejected", response.Coverage.ScreeningsPriceRejected,
 		"failure_reasons", response.Coverage.InventoryFailureReasons,
 		"winner_verified", response.Coverage.WinnerVerified,
+		"discovery_ms", response.Coverage.DiscoveryMS,
+		"inventory_ms", response.Coverage.InventoryMS,
+		"verification_ms", response.Coverage.VerificationMS,
 	)
 	encoded, _ := json.Marshal(response)
 	etagHash := sha256.Sum256(encoded)

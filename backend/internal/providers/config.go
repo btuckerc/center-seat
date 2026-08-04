@@ -40,8 +40,8 @@ func FromEnvironment() (Discovery, Inventory, error) {
 		provider, err := NewFandangoLocal(FandangoLocalConfig{
 			BaseURL:        os.Getenv("FANDANGO_BASE_URL"),
 			RequestTimeout: 8 * time.Second,
-			MinimumDelay:   time.Duration(environmentInt("FANDANGO_MINIMUM_DELAY_MS", 175)) * time.Millisecond,
-			MaxConcurrency: environmentInt("FANDANGO_MAX_CONCURRENCY", 4),
+			MinimumDelay:   time.Duration(environmentInt("FANDANGO_MINIMUM_DELAY_MS", 50)) * time.Millisecond,
+			MaxConcurrency: environmentInt("FANDANGO_MAX_CONCURRENCY", 8),
 		}, nil)
 		if err != nil {
 			return nil, nil, err

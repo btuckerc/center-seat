@@ -10,6 +10,8 @@ const configurationProblem = () =>
     { status: 503 },
   );
 
+const liveQueryTimeoutMs = 45_000;
+
 export async function POST(request: Request) {
   const apiBase = process.env.CENTERSEAT_API_URL?.replace(/\/$/, "");
   if (!apiBase || !/^https?:\/\//.test(apiBase)) return configurationProblem();
@@ -26,7 +28,7 @@ export async function POST(request: Request) {
       },
       body,
       cache: "no-store",
-      signal: AbortSignal.timeout(15_000),
+      signal: AbortSignal.timeout(liveQueryTimeoutMs),
     });
     return new Response(await upstream.arrayBuffer(), {
       status: upstream.status,
@@ -39,14 +41,20 @@ export async function POST(request: Request) {
           : {}),
       },
     });
-  } catch {
+  } catch (error) {
+    const timedOut =
+      error instanceof Error &&
+      (error.name === "TimeoutError" || error.name === "AbortError");
     return Response.json(
       {
         type: "https://centerseat.invalid/problems/provider-unavailable",
-        title: "Live inventory is temporarily unavailable",
+        title: timedOut
+          ? "Live inventory search took too long"
+          : "Live inventory is temporarily unavailable",
         status: 503,
-        detail:
-          "The configured query service could not be reached. No cached or fabricated result was returned.",
+        detail: timedOut
+          ? "The live source did not finish within 45 seconds. No cached or fabricated result was returned."
+          : "The configured query service could not be reached. No cached or fabricated result was returned.",
       },
       { status: 503 },
     );

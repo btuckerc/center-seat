@@ -17,8 +17,9 @@ HTTP contract ── idempotency / validation / request ID / ETag
 Query service
   ├── cached discovery adapter ── configured showtime source
   ├── constraint planner ──────── local filtering and candidate scoring
-  ├── adaptive fan-out ────────── parallel live checks; expands only as needed
-  ├── geometry ranker ─────────── contiguous blocks + confidence penalties
+  ├── adaptive fan-out ────────── date-stratified parallel live checks
+  ├── proof bound ─────────────── stop only when unchecked screens cannot win
+  ├── geometry ranker ─────────── preferred zones + contiguous blocks
   └── final verifier ──────────── one uncached read-only availability check
   ▼
 Winner + alternatives + score explanation + freshness + booking URL
@@ -34,7 +35,7 @@ Winner + alternatives + score explanation + freshness + booking URL
 | Live seat read | 5 s per candidate | Retry transient transport failures; expand to another batch when needed |
 | Ranking | 20 ms p95 | Exclude unrankable low-confidence maps |
 | Winner verification | 5 s hard timeout | Mark result partial; never create a hold |
-| End to end | 3 s typical | Preserve explainable partial results during upstream degradation |
+| End to end | 3–4 s typical; 45 s web ceiling | API response writes remain open for 60 s so the web layer owns the client deadline |
 
 ## Cache policy
 
@@ -56,21 +57,42 @@ step. Production startup never selects fixture data implicitly.
 ## Reliability rules
 
 - Per-provider deadlines and concurrency limits protect the query path.
-- Live checks start with the strongest four candidates in parallel and expand in
-  bounded batches only when the result lacks enough successful comparisons or a
-  high-confidence winner. This is an internal decision, not a user setting.
+- The local Fandango scheduler mirrors the observed browser read pattern while
+  remaining more conservative: live reads start 50 ms apart with at most eight
+  in flight. Retry backoff still handles transient 5xx and throttling responses.
+- Identical live-map reads already in progress are coalesced, so overlapping
+  searches share one upstream request without extending inventory freshness.
+- Live checks start with a four-screening proof pass spread across represented
+  local dates. If more coverage is needed, a bounded work-conserving pipeline
+  immediately replaces each completed read while continuously reevaluating the
+  proof bound. This is an internal decision, not a user setting.
+- Early stopping is proof-based, not threshold-based. A screening's theoretical
+  maximum is computed before its live map is read. The service stops only after
+  every date has sufficient coverage and the current winner is at least as good
+  as every unchecked or failed screening's maximum. Otherwise it continues to
+  the automatic safety ceiling and returns an explicit partial result.
 - Inventory failures degrade individual candidates, not the whole search.
 - A successfully loaded map with no eligible block or an excessive live price
   is counted as a normal exclusion, not mislabeled as an upstream failure.
-- A verified result with sufficient successful comparisons remains complete
-  even if stale candidates failed. Materially reduced coverage returns a
-  normalized partial response without leaking provider payloads or request
-  details.
+- A provider response that explicitly says a screening is gone or unavailable
+  is also a conclusive exclusion; transport, throttling, and malformed-layout
+  errors remain degraded checks that can prevent a best-across-range claim.
+- A failed live check can be safely ignored only when its theoretical maximum
+  cannot beat the verified winner. Any unresolved competitive screening keeps
+  `range_best_proven` false and produces a normalized partial response without
+  leaking provider payloads or request details.
 - Idempotency keys bind to canonical request hashes; key reuse with another body
   returns a conflict.
 - `GET` results use strong ETags and short private cache headers.
 - Provider responses are normalized before transport handlers see them.
 - Geometry confidence is part of ranking and the public explanation.
+- Dead-center and two-thirds-back profiles use explicit preferred depth bands.
+  The ranker searches inside the band whenever an eligible option exists and
+  marks a global choice as `closest_fallback` when the band is exhausted.
+- Custom profiles use normalized left-to-right and screen-to-back bounds. The
+  same drawn area therefore maps onto any provider auditorium geometry; the
+  full contiguous party block must fit inside it before the ranker falls back
+  to the nearest eligible block outside the area.
 - A single-ticket dead-center query exposes a four-position ideal zone and all
   currently available equivalent choices; unavailable positions remain visible
   rather than shifting the geometric target.

@@ -15,6 +15,8 @@ import (
 	"centerseat/backend/internal/service"
 )
 
+const liveQueryWriteTimeout = 60 * time.Second
+
 func main() {
 	if len(os.Args) > 1 && os.Args[1] == "healthcheck" {
 		client := &http.Client{Timeout: 2 * time.Second}
@@ -34,16 +36,13 @@ func main() {
 	probeContext, stopProbes := context.WithCancel(context.Background())
 	defer stopProbes()
 	go monitorProviders(probeContext, logger, discovery, inventory, 30*time.Second)
-	svc := service.New(discovery, inventory, 6)
+	svc := service.New(discovery, inventory, 8)
 	api := httpapi.New(svc, logger)
 	address := os.Getenv("CENTERSEAT_HTTP_ADDR")
 	if address == "" {
 		address = ":8080"
 	}
-	server := &http.Server{
-		Addr: address, Handler: api.Handler(), ReadHeaderTimeout: 5 * time.Second,
-		ReadTimeout: 10 * time.Second, WriteTimeout: 20 * time.Second, IdleTimeout: 60 * time.Second,
-	}
+	server := newHTTPServer(address, api.Handler())
 	go func() {
 		logger.Info("centerseat api listening", "address", address)
 		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -58,6 +57,17 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	_ = server.Shutdown(ctx)
+}
+
+func newHTTPServer(address string, handler http.Handler) *http.Server {
+	return &http.Server{
+		Addr:              address,
+		Handler:           handler,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       10 * time.Second,
+		WriteTimeout:      liveQueryWriteTimeout,
+		IdleTimeout:       60 * time.Second,
+	}
 }
 
 type namedHealthChecker struct {

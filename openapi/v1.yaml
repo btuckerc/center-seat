@@ -266,7 +266,11 @@ components:
           maximum: 12
         seat_profile:
           type: string
-          enum: [balanced, dead_center, two_thirds_back, aisle, front, back]
+          enum: [balanced, dead_center, two_thirds_back, aisle, front, back, custom]
+        custom_seat_zone:
+          allOf:
+            - $ref: "#/components/schemas/SeatZone"
+          description: Required when seat_profile is custom. Normalized auditorium bounds, where x runs left to right and y runs from the screen to the back row.
         formats:
           type: array
           uniqueItems: true
@@ -329,10 +333,9 @@ components:
         candidate_limit:
           type: integer
           minimum: 1
-          maximum: 25
-          default: 18
+          maximum: 64
           deprecated: true
-          description: Compatibility-only upper bound. Interactive clients should omit this; the service expands live coverage automatically until it has a strong result.
+          description: Compatibility-only upper bound. Interactive clients should omit this; the service compares every represented date and adaptively expands until the range winner is proven or the full automatic safety ceiling is reached.
     LocationConstraint:
       type: object
       additionalProperties: false
@@ -445,6 +448,7 @@ components:
         - score
         - confidence
         - explanation
+        - profile_match
         - verified_at
         - seat_map
       properties:
@@ -458,7 +462,7 @@ components:
             $ref: "#/components/schemas/Seat"
         seat_options:
           type: array
-          description: Equally strong currently available choices for a single-seat query.
+          description: Strong currently available choices for a single-seat query, ordered with the primary recommendation first.
           items:
             $ref: "#/components/schemas/Seat"
         score:
@@ -477,6 +481,10 @@ components:
           type: object
           additionalProperties:
             type: number
+        profile_match:
+          type: string
+          enum: [preferred_zone, closest_fallback]
+          description: Whether the recommendation is inside the selected profile's preferred viewing zone or is an explicitly labeled fallback.
         verified_at:
           type: string
           format: date-time
@@ -548,6 +556,12 @@ components:
             $ref: "#/components/schemas/Seat"
         target:
           $ref: "#/components/schemas/GeometryPoint"
+        preferred_depth:
+          $ref: "#/components/schemas/DepthRange"
+        preferred_zone_bounds:
+          allOf:
+            - $ref: "#/components/schemas/SeatZone"
+          description: The normalized custom area applied to this auditorium, when a custom seat profile was requested.
         recommended_zone:
           type: array
           description: Up to four physical seat positions closest to the profile target, including unavailable positions.
@@ -571,10 +585,55 @@ components:
           type: number
           minimum: 0
           maximum: 1
+    DepthRange:
+      type: object
+      required: [minimum, maximum]
+      properties:
+        minimum:
+          type: number
+          minimum: 0
+          maximum: 1
+        maximum:
+          type: number
+          minimum: 0
+          maximum: 1
+    SeatZone:
+      type: object
+      additionalProperties: false
+      required: [minimum_x, maximum_x, minimum_y, maximum_y]
+      properties:
+        minimum_x:
+          type: number
+          minimum: 0
+          maximum: 1
+        maximum_x:
+          type: number
+          minimum: 0
+          maximum: 1
+        minimum_y:
+          type: number
+          minimum: 0
+          maximum: 1
+          description: Front edge of the preferred area, measured from the screen.
+        maximum_y:
+          type: number
+          minimum: 0
+          maximum: 1
+          description: Back edge of the preferred area.
     Coverage:
       type: object
-      required: [screenings_discovered, screenings_pruned, inventories_checked, inventories_fresh, inventories_failed, screenings_unavailable, screenings_price_rejected, inventory_failure_reasons, winner_verified, elapsed_ms]
+      required: [dates_requested, dates_with_screenings, dates_compared, range_best_proven, screenings_discovered, screenings_pruned, inventories_checked, inventories_fresh, inventories_failed, screenings_unavailable, screenings_price_rejected, inventory_failure_reasons, winner_verified, discovery_ms, inventory_ms, verification_ms, elapsed_ms]
       properties:
+        dates_requested:
+          type: integer
+        dates_with_screenings:
+          type: integer
+        dates_compared:
+          type: integer
+          description: Distinct local screening dates with at least one successful live availability comparison.
+        range_best_proven:
+          type: boolean
+          description: True only when the returned winner was reverified and every unchecked or failed matching screening had a score ceiling no higher than the winner.
         screenings_discovered:
           type: integer
         screenings_pruned:
@@ -589,7 +648,7 @@ components:
           description: Seat-map reads that failed because of an upstream, timeout, or payload error.
         screenings_unavailable:
           type: integer
-          description: Successfully loaded maps with no block satisfying the seat and party constraints.
+          description: Screenings conclusively unavailable at the provider or fresh maps with no block satisfying the seat and party constraints.
         screenings_price_rejected:
           type: integer
           description: Successfully loaded maps rejected by the live price constraint.
@@ -605,6 +664,15 @@ components:
           type: integer
           deprecated: true
           description: Legacy alias for the failed inventory-read count.
+        discovery_ms:
+          type: integer
+          description: Time spent resolving and loading matching showtimes.
+        inventory_ms:
+          type: integer
+          description: Time spent loading and ranking candidate seat maps.
+        verification_ms:
+          type: integer
+          description: Time spent on the final uncached winner verification.
         elapsed_ms:
           type: integer
     ProviderStatus:
