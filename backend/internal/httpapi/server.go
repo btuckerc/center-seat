@@ -73,6 +73,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /v1/providers", s.providers)
 	s.mux.HandleFunc("GET /v1/movie-suggestions", s.movieSuggestions)
 	s.mux.HandleFunc("POST /v1/showtime-queries", s.createShowtimeQuery)
+	s.mux.HandleFunc("POST /v1/discovery-prefetch", s.prefetchDiscovery)
 	s.mux.HandleFunc("POST /v1/seat-queries", s.createQuery)
 	s.mux.HandleFunc("GET /v1/seat-queries/{query_id}", s.getQuery)
 	s.mux.HandleFunc("GET /v1/seat-queries/{query_id}/recommendations/{rank}", s.getRecommendation)
@@ -295,7 +296,11 @@ func (s *Server) createQuery(w http.ResponseWriter, r *http.Request) {
 	queryID := newID("qry")
 	response, err := s.service.Query(r.Context(), queryID, request)
 	if err != nil {
-		s.problem(w, r, http.StatusServiceUnavailable, "provider_unavailable", "Seat query failed", err.Error())
+		if errors.Is(err, service.ErrLocationNotFound) {
+			s.problem(w, r, http.StatusUnprocessableEntity, "validation_failed", "Query validation failed", err.Error())
+		} else {
+			s.problem(w, r, http.StatusServiceUnavailable, "provider_unavailable", "Seat query failed", err.Error())
+		}
 		return
 	}
 	s.logger.Info("seat query evaluated",
@@ -345,7 +350,11 @@ func (s *Server) createShowtimeQuery(w http.ResponseWriter, r *http.Request) {
 	queryID := newID("stq")
 	response, err := s.service.Showtimes(r.Context(), queryID, request)
 	if err != nil {
-		s.problem(w, r, http.StatusServiceUnavailable, "provider_unavailable", "Showtime query failed", err.Error())
+		if errors.Is(err, service.ErrLocationNotFound) {
+			s.problem(w, r, http.StatusUnprocessableEntity, "validation_failed", "Query validation failed", err.Error())
+		} else {
+			s.problem(w, r, http.StatusServiceUnavailable, "provider_unavailable", "Showtime query failed", err.Error())
+		}
 		return
 	}
 	encoded, _ := json.Marshal(response)
@@ -353,6 +362,24 @@ func (s *Server) createShowtimeQuery(w http.ResponseWriter, r *http.Request) {
 	cached := newCachedResult(bodyHash, encoded, response.ExpiresAt, response.ExpiresAt)
 	s.store(queryID, key, cached)
 	serveCached(w, cached, s.now())
+}
+
+// prefetchDiscovery warms showtime discovery for a search the user is still composing; the
+// response carries no data.
+func (s *Server) prefetchDiscovery(w http.ResponseWriter, r *http.Request) {
+	request, _, _, ok := s.decodeQuery(w, r, "prefetch")
+	if !ok {
+		return
+	}
+	if err := s.service.PrefetchDiscovery(r.Context(), request); err != nil {
+		if errors.Is(err, service.ErrLocationNotFound) {
+			s.problem(w, r, http.StatusUnprocessableEntity, "validation_failed", "Query validation failed", err.Error())
+		} else {
+			s.problem(w, r, http.StatusServiceUnavailable, "provider_unavailable", "Discovery prefetch failed", err.Error())
+		}
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *Server) getQuery(w http.ResponseWriter, r *http.Request) {

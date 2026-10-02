@@ -14,13 +14,14 @@ import (
 	"time"
 
 	"centerseat/backend/internal/domain"
+	"centerseat/backend/internal/geocode"
 	"centerseat/backend/internal/service"
 	"centerseat/backend/internal/testfixtures"
 )
 
 func newTestServer() *Server {
 	provider := testfixtures.Provider{}
-	return New(service.New(provider, provider, 3), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	return New(service.New(provider, provider, 3, nil), slog.New(slog.NewTextHandler(io.Discard, nil)))
 }
 
 // queryPayload targets tomorrow so fixture screenings are never excluded as already started.
@@ -71,6 +72,46 @@ func decodeQuery(t *testing.T, rec *httptest.ResponseRecorder) domain.QueryRespo
 	return response
 }
 
+type notFoundLocationResolver struct{}
+
+func (notFoundLocationResolver) Resolve(context.Context, string) (geocode.Place, error) {
+	return geocode.Place{}, geocode.ErrNotFound
+}
+
+func TestUnresolvedTextLocationReturnsValidationFailed(t *testing.T) {
+	provider := testfixtures.Provider{}
+	server := New(service.New(provider, provider, 3, notFoundLocationResolver{}), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	payload := queryPayload(func(q *domain.QueryRequest) {
+		q.Location.Latitude, q.Location.Longitude = 0, 0
+	})
+	for _, path := range []string{"/v1/seat-queries", "/v1/showtime-queries"} {
+		rec := serve(server, http.MethodPost, path, payload, map[string]string{"Idempotency-Key": "unknown-place-1"})
+		expectProblem(t, rec, http.StatusUnprocessableEntity, "validation_failed")
+	}
+}
+
+type prefetchingDiscovery struct {
+	testfixtures.Provider
+	prefetched atomic.Int32
+}
+
+func (d *prefetchingDiscovery) PrefetchDiscovery(context.Context, domain.QueryRequest) error {
+	d.prefetched.Add(1)
+	return nil
+}
+
+func TestDiscoveryPrefetchWarmsValidQueriesOnly(t *testing.T) {
+	discovery := &prefetchingDiscovery{}
+	server := New(service.New(discovery, testfixtures.Provider{}, 3, nil), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if rec := serve(server, http.MethodPost, "/v1/discovery-prefetch", queryPayload(nil), nil); rec.Code != http.StatusNoContent || rec.Body.Len() != 0 {
+		t.Fatalf("expected an empty 204, got %d: %s", rec.Code, rec.Body.String())
+	}
+	invalid := queryPayload(func(q *domain.QueryRequest) { q.Dates.End = "not-a-date" })
+	expectProblem(t, serve(server, http.MethodPost, "/v1/discovery-prefetch", invalid, nil), http.StatusUnprocessableEntity, "validation_failed")
+	if got := discovery.prefetched.Load(); got != 1 {
+		t.Fatalf("expected exactly the valid query to be prefetched, got %d", got)
+	}
+}
 func TestCreateQueryIsIdempotentAndCacheable(t *testing.T) {
 	server := newTestServer()
 	payload := queryPayload(nil)
@@ -145,7 +186,7 @@ func (g gatedDiscovery) Discover(ctx context.Context, q domain.QueryRequest) ([]
 func TestConcurrentRequestsWithSameKeyQueryProvidersOnce(t *testing.T) {
 	provider := testfixtures.Provider{}
 	discovery := gatedDiscovery{Provider: provider, calls: &atomic.Int32{}, release: make(chan struct{})}
-	server := New(service.New(discovery, provider, 3), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	server := New(service.New(discovery, provider, 3, nil), slog.New(slog.NewTextHandler(io.Discard, nil)))
 	payload := queryPayload(nil)
 	key := map[string]string{"Idempotency-Key": "coalesce-key-1"}
 
@@ -248,4 +289,27 @@ func TestMovieSuggestionsAndAlternativeMapsAreReadOnDemand(t *testing.T) {
 	if recommendation.Rank != 2 || recommendation.SeatMap == nil || len(recommendation.SeatMap.Seats) == 0 {
 		t.Fatalf("expected refreshed alternative map, got %#v", recommendation)
 	}
+}
+
+type seatsGoneInventory struct {
+	testfixtures.Provider
+	gone atomic.Bool
+}
+
+func (provider *seatsGoneInventory) GetAvailability(ctx context.Context, showtime domain.Showtime, final bool) (domain.Inventory, error) {
+	inventory, err := provider.Provider.GetAvailability(ctx, showtime, final)
+	if err == nil && final && provider.gone.Load() {
+		for i := range inventory.Seats {
+			inventory.Seats[i].Status = "sold"
+		}
+	}
+	return inventory, err
+}
+
+func TestRefreshReturnsConflictWhenSeatsAreGone(t *testing.T) {
+	provider := &seatsGoneInventory{}
+	server := New(service.New(provider, provider, 3, nil), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	response := decodeQuery(t, serve(server, http.MethodPost, "/v1/seat-queries", queryPayload(nil), nil))
+	provider.gone.Store(true)
+	expectProblem(t, serve(server, http.MethodGet, "/v1/seat-queries/"+response.QueryID+"/recommendations/1", nil, nil), http.StatusConflict, "seats_unavailable")
 }

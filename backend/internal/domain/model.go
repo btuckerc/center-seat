@@ -235,6 +235,16 @@ type Inventory struct {
 	TicketFee   *float64      `json:"-"`
 	Currency    string        `json:"-"`
 }
+type PriceEstimate struct {
+	TicketCount    int      `json:"ticket_count"`
+	Currency       *string  `json:"currency"`
+	TicketPrice    *float64 `json:"ticket_price"`
+	FeePerTicket   *float64 `json:"fee_per_ticket"`
+	EstimatedTotal *float64 `json:"estimated_total"`
+	FeesIncluded   bool     `json:"fees_included"`
+	IsEstimate     bool     `json:"is_estimate"`
+	Qualification  string   `json:"qualification"`
+}
 
 type Recommendation struct {
 	Rank           int                `json:"rank"`
@@ -247,6 +257,7 @@ type Recommendation struct {
 	ScoreBreakdown map[string]float64 `json:"score_breakdown"`
 	ProfileMatch   string             `json:"profile_match"`
 	VerifiedAt     time.Time          `json:"verified_at"`
+	Price          PriceEstimate      `json:"price"`
 	BookingURL     string             `json:"booking_url"`
 	SeatMap        *SeatMap           `json:"seat_map"`
 }
@@ -291,27 +302,34 @@ type Coverage struct {
 	VerificationMS          int            `json:"verification_ms"`
 	ElapsedMS               int            `json:"elapsed_ms"`
 }
+type ResolvedLocation struct {
+	Label     string  `json:"label"`
+	Latitude  float64 `json:"latitude"`
+	Longitude float64 `json:"longitude"`
+}
 
 type QueryResponse struct {
-	QueryID      string           `json:"query_id"`
-	Status       string           `json:"status"`
-	GeneratedAt  time.Time        `json:"generated_at"`
-	ExpiresAt    time.Time        `json:"expires_at"`
-	RefreshUntil time.Time        `json:"refresh_until"`
-	Coverage     Coverage         `json:"coverage"`
-	Winner       *Recommendation  `json:"winner"`
-	Alternatives []Recommendation `json:"alternatives"`
-	Warnings     []string         `json:"warnings,omitempty"`
+	QueryID          string            `json:"query_id"`
+	Status           string            `json:"status"`
+	GeneratedAt      time.Time         `json:"generated_at"`
+	ExpiresAt        time.Time         `json:"expires_at"`
+	RefreshUntil     time.Time         `json:"refresh_until"`
+	ResolvedLocation *ResolvedLocation `json:"resolved_location,omitempty"`
+	Coverage         Coverage          `json:"coverage"`
+	Winner           *Recommendation   `json:"winner"`
+	Alternatives     []Recommendation  `json:"alternatives"`
+	Warnings         []string          `json:"warnings,omitempty"`
 }
 
 type ShowtimeQueryResponse struct {
-	QueryID     string     `json:"query_id"`
-	Status      string     `json:"status"`
-	GeneratedAt time.Time  `json:"generated_at"`
-	ExpiresAt   time.Time  `json:"expires_at"`
-	Coverage    Coverage   `json:"coverage"`
-	Showtimes   []Showtime `json:"showtimes"`
-	Warnings    []string   `json:"warnings,omitempty"`
+	QueryID          string            `json:"query_id"`
+	Status           string            `json:"status"`
+	GeneratedAt      time.Time         `json:"generated_at"`
+	ExpiresAt        time.Time         `json:"expires_at"`
+	ResolvedLocation *ResolvedLocation `json:"resolved_location,omitempty"`
+	Coverage         Coverage          `json:"coverage"`
+	Showtimes        []Showtime        `json:"showtimes"`
+	Warnings         []string          `json:"warnings,omitempty"`
 }
 
 type ProviderStatus struct {

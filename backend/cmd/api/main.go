@@ -7,9 +7,11 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
+	"centerseat/backend/internal/geocode"
 	"centerseat/backend/internal/httpapi"
 	"centerseat/backend/internal/providers"
 	"centerseat/backend/internal/service"
@@ -36,7 +38,15 @@ func main() {
 	probeContext, stopProbes := context.WithCancel(context.Background())
 	defer stopProbes()
 	go monitorProviders(probeContext, logger, discovery, inventory, 30*time.Second)
-	svc := service.New(discovery, inventory, 8)
+	var resolver geocode.Resolver
+	if strings.ToLower(strings.TrimSpace(os.Getenv("CENTERSEAT_GEOCODER_URL"))) != "off" {
+		resolver = geocode.NewNominatim(geocode.NominatimConfig{
+			BaseURL:   os.Getenv("CENTERSEAT_GEOCODER_URL"),
+			UserAgent: os.Getenv("CENTERSEAT_GEOCODER_USER_AGENT"),
+			Countries: os.Getenv("CENTERSEAT_GEOCODER_COUNTRIES"),
+		})
+	}
+	svc := service.New(discovery, inventory, 8, resolver)
 	api := httpapi.New(svc, logger)
 	address := os.Getenv("CENTERSEAT_HTTP_ADDR")
 	if address == "" {

@@ -295,14 +295,59 @@ func BestBlock(showtime domain.Showtime, inventory domain.Inventory, q domain.Qu
 		zone := *policy.preferredZone
 		preferredZone = &zone
 	}
+	price := priceEstimate(showtime, inventory, q.TicketCount)
 	return domain.Recommendation{
 		Showtime: showtime, Seats: best, SeatOptions: seatOptions, Score: round2(score), Confidence: inventory.Confidence,
-		Explanation: explanation, ScoreBreakdown: bestCandidate.parts, ProfileMatch: profileMatch, VerifiedAt: inventory.ObservedAt, BookingURL: showtime.BookingURL,
+		Explanation: explanation, ScoreBreakdown: bestCandidate.parts, ProfileMatch: profileMatch, VerifiedAt: inventory.ObservedAt, Price: price, BookingURL: showtime.BookingURL,
 		SeatMap: &domain.SeatMap{
 			Seats: inventory.Seats, Target: domain.GeometryPoint{X: target.X, Y: target.Y}, PreferredDepth: preferredDepth, PreferredZone: preferredZone, RecommendedZone: recommendedZone,
 			Confidence: inventory.Confidence, ObservedAt: inventory.ObservedAt,
 		},
 	}, true
+}
+
+func priceEstimate(showtime domain.Showtime, inventory domain.Inventory, ticketCount int) domain.PriceEstimate {
+	if ticketCount < 1 {
+		ticketCount = 1
+	}
+	price := inventory.TicketPrice
+	fee := inventory.TicketFee
+	currency := inventory.Currency
+	source := "provider seat map"
+	if price == nil && showtime.TotalPrice != nil {
+		value := *showtime.TotalPrice / float64(ticketCount)
+		if fee != nil {
+			value -= *fee
+		}
+		price = &value
+		currency = showtime.Currency
+		source = "provider price data"
+	}
+	total := showtime.TotalPrice
+	if price != nil {
+		value := *price
+		if fee != nil {
+			value += *fee
+		}
+		value = round2(value * float64(ticketCount))
+		total = &value
+	}
+	var currencyValue *string
+	if currency != "" {
+		currencyValue = &currency
+	}
+	feesIncluded := fee != nil
+	qualification := fmt.Sprintf("Estimate from %s for %d ticket%s", source, ticketCount, map[bool]string{true: "", false: "s"}[ticketCount == 1])
+	if feesIncluded {
+		qualification += "; provider ticket fees included"
+	} else {
+		qualification += "; fees unknown"
+	}
+	qualification += "; taxes and checkout fees may change the final total."
+	return domain.PriceEstimate{
+		TicketCount: ticketCount, Currency: currencyValue, TicketPrice: price, FeePerTicket: fee,
+		EstimatedTotal: total, FeesIncluded: feesIncluded, IsEstimate: true, Qualification: qualification,
+	}
 }
 
 func availableZoneSeats(seats []domain.Seat, zone []string, q domain.QueryRequest) []domain.Seat {

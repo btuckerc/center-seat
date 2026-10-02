@@ -15,6 +15,12 @@ type MovieSuggester interface {
 	SuggestMovies(context.Context, string, int) ([]domain.MovieSuggestion, error)
 }
 
+// DiscoveryPrefetcher is implemented by discovery providers that cache showtime lists, so a
+// background discovery for a query still being composed makes the following search faster.
+type DiscoveryPrefetcher interface {
+	PrefetchDiscovery(context.Context, domain.QueryRequest) error
+}
+
 type Inventory interface {
 	Name() string
 	Supports(domain.Showtime) bool

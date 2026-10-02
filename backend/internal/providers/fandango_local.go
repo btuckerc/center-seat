@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"math/rand/v2"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -22,12 +23,16 @@ import (
 const (
 	defaultFandangoBaseURL = "https://www.fandango.com"
 	fandangoProviderName   = "fandango-local-readonly"
+	// fandangoDiscoveryReadTimeout bounds a shared showtime-list read; it matches the service's
+	// discovery deadline.
+	fandangoDiscoveryReadTimeout = 8 * time.Second
 )
 
 var (
 	fandangoDigits        = regexp.MustCompile(`^[0-9]+$`)
 	fandangoMovieIDSuffix = regexp.MustCompile(`-([0-9]+)$`)
 	fandangoPostalCode    = regexp.MustCompile(`\b[0-9]{5}(?:-[0-9]{4})?\b`)
+	fandangoTitleYear     = regexp.MustCompile(`\s+(19|20)\d{2}$`)
 )
 
 type FandangoLocalConfig struct {
@@ -42,18 +47,24 @@ type FandangoLocal struct {
 	client *http.Client
 	gate   chan struct{}
 
-	throttleMu  sync.Mutex
-	lastStart   time.Time
-	statusMu    sync.RWMutex
-	lastSuccess time.Time
+	throttleMu    sync.Mutex
+	lastStart     time.Time
+	cooldownUntil time.Time
+	statusMu      sync.RWMutex
+	lastSuccess   time.Time
 
-	cacheMu        sync.RWMutex
-	movieCache     map[string]cachedFandangoMovie
-	discoveryCache map[string]cachedFandangoShowtimes
-	inventoryCache map[string]cachedFandangoInventory
-	flightMu       sync.Mutex
-	inventoryReads map[string]*fandangoInventoryRead
-	now            func() time.Time
+	prefetchMu     sync.Mutex
+	prefetchActive bool
+
+	cacheMu         sync.RWMutex
+	movieCache      map[string]cachedFandangoMovie
+	suggestionCache map[string]cachedFandangoSuggestions
+	discoveryCache  map[string]cachedFandangoShowtimes
+	inventoryCache  map[string]cachedFandangoInventory
+	flightMu        sync.Mutex
+	discoveryReads  map[string]*fandangoDiscoveryRead
+	inventoryReads  map[string]*fandangoInventoryRead
+	now             func() time.Time
 }
 
 func evictFandangoCache[T any](cache map[string]T, now time.Time, cap int, expires func(T) time.Time) {
@@ -85,10 +96,25 @@ type fandangoInventoryRead struct {
 	done      chan struct{}
 	inventory domain.Inventory
 	err       error
+	waiters   int
+	cancel    context.CancelFunc
+}
+
+type fandangoDiscoveryRead struct {
+	done      chan struct{}
+	showtimes []domain.Showtime
+	err       error
 }
 
 type cachedFandangoMovie struct {
 	movie     fandangoMovie
+	expiresAt time.Time
+}
+
+// cachedFandangoSuggestions holds the full ranked autocomplete result for one query; callers
+// apply their own limit.
+type cachedFandangoSuggestions struct {
+	movies    []fandangoMovie
 	expiresAt time.Time
 }
 
@@ -131,14 +157,16 @@ func NewFandangoLocal(config FandangoLocalConfig, client *http.Client) (*Fandang
 		return http.ErrUseLastResponse
 	}
 	return &FandangoLocal{
-		config:         config,
-		client:         &clientCopy,
-		gate:           make(chan struct{}, config.MaxConcurrency),
-		movieCache:     map[string]cachedFandangoMovie{},
-		discoveryCache: map[string]cachedFandangoShowtimes{},
-		inventoryCache: map[string]cachedFandangoInventory{},
-		inventoryReads: map[string]*fandangoInventoryRead{},
-		now:            time.Now,
+		config:          config,
+		client:          &clientCopy,
+		gate:            make(chan struct{}, config.MaxConcurrency),
+		movieCache:      map[string]cachedFandangoMovie{},
+		suggestionCache: map[string]cachedFandangoSuggestions{},
+		discoveryCache:  map[string]cachedFandangoShowtimes{},
+		inventoryCache:  map[string]cachedFandangoInventory{},
+		discoveryReads:  map[string]*fandangoDiscoveryRead{},
+		inventoryReads:  map[string]*fandangoInventoryRead{},
+		now:             time.Now,
 	}, nil
 }
 
@@ -183,6 +211,10 @@ func (f *FandangoLocal) markSuccess() {
 }
 
 func (f *FandangoLocal) Discover(ctx context.Context, query domain.QueryRequest) ([]domain.Showtime, error) {
+	return f.discoverWithLimit(ctx, query, 0)
+}
+
+func (f *FandangoLocal) discoverWithLimit(ctx context.Context, query domain.QueryRequest, maxDates int) ([]domain.Showtime, error) {
 	if fandangoPostalCode.FindString(query.Location.Query) == "" && query.Location.Latitude == 0 && query.Location.Longitude == 0 {
 		return nil, errors.New("Fandango location requires a 5-digit US ZIP code or browser location coordinates")
 	}
@@ -209,14 +241,25 @@ func (f *FandangoLocal) Discover(ctx context.Context, query domain.QueryRequest)
 		err   error
 	}
 	results := make(chan result, len(dates))
+	workers := len(dates)
+	if maxDates > 0 && maxDates < workers {
+		workers = maxDates
+	}
+	jobs := make(chan int, len(dates))
+	for index := range dates {
+		jobs <- index
+	}
+	close(jobs)
 	var wait sync.WaitGroup
-	for index, date := range dates {
+	for range workers {
 		wait.Add(1)
-		go func(index int, date time.Time) {
+		go func() {
 			defer wait.Done()
-			items, err := f.discoverDate(ctx, movie, date.Format(time.DateOnly), query)
-			results <- result{index: index, items: items, err: err}
-		}(index, date)
+			for index := range jobs {
+				items, err := f.discoverDate(ctx, movie, dates[index].Format(time.DateOnly), query)
+				results <- result{index: index, items: items, err: err}
+			}
+		}()
 	}
 	wait.Wait()
 	close(results)
@@ -270,6 +313,39 @@ func (f *FandangoLocal) SuggestMovies(ctx context.Context, query string, limit i
 	if limit < 1 || limit > 10 {
 		limit = 6
 	}
+	movies, err := f.rankedMovieSuggestions(ctx, query)
+	if err != nil {
+		return nil, err
+	}
+	if len(movies) > limit {
+		movies = movies[:limit]
+	}
+	suggestions := make([]domain.MovieSuggestion, 0, len(movies))
+	for _, movie := range movies {
+		year := ""
+		if len(movie.ReleaseDate) >= 4 {
+			year = movie.ReleaseDate[:4]
+		}
+		suggestions = append(suggestions, domain.MovieSuggestion{
+			ID: movie.ID, Title: movie.Name,
+			ReleaseDate: movie.ReleaseDate, Year: year,
+		})
+	}
+	return suggestions, nil
+}
+
+// rankedMovieSuggestions returns every valid autocomplete movie for query, best match first.
+// Results are cached briefly: each typed prefix would otherwise take an upstream slot shared with
+// seat-map reads.
+func (f *FandangoLocal) rankedMovieSuggestions(ctx context.Context, query string) ([]fandangoMovie, error) {
+	key := strings.ToLower(query)
+	now := f.now()
+	f.cacheMu.RLock()
+	cached, ok := f.suggestionCache[key]
+	f.cacheMu.RUnlock()
+	if ok && now.Before(cached.expiresAt) {
+		return cached.movies, nil
+	}
 	var response fandangoAutocompleteResponse
 	if err := f.getJSON(ctx, "/napi/home/autocompleteDesktopSearch", url.Values{"search": {query}}, &response); err != nil {
 		return nil, err
@@ -283,7 +359,7 @@ func (f *FandangoLocal) SuggestMovies(ctx context.Context, query string, limit i
 	for index, candidate := range response.ResultsByType.Movies.Items {
 		movie, valid := normalizeFandangoMovie(candidate)
 		if valid {
-			ranked = append(ranked, rankedMovie{movie: movie, score: fandangoTitleScore(query, movie.Name), order: index})
+			ranked = append(ranked, rankedMovie{movie: movie, score: fandangoMovieScore(query, movie), order: index})
 		}
 	}
 	sort.SliceStable(ranked, func(i, j int) bool {
@@ -292,22 +368,16 @@ func (f *FandangoLocal) SuggestMovies(ctx context.Context, query string, limit i
 		}
 		return ranked[i].score > ranked[j].score
 	})
-	if len(ranked) > limit {
-		ranked = ranked[:limit]
+	movies := make([]fandangoMovie, len(ranked))
+	for index, candidate := range ranked {
+		movies[index] = candidate.movie
 	}
-	suggestions := make([]domain.MovieSuggestion, 0, len(ranked))
-	for _, candidate := range ranked {
-		year := ""
-		if len(candidate.movie.ReleaseDate) >= 4 {
-			year = candidate.movie.ReleaseDate[:4]
-		}
-		suggestions = append(suggestions, domain.MovieSuggestion{
-			ID: candidate.movie.ID, Title: candidate.movie.Name,
-			ReleaseDate: candidate.movie.ReleaseDate, Year: year,
-		})
-	}
+	f.cacheMu.Lock()
+	evictFandangoCache(f.suggestionCache, now, 500, func(value cachedFandangoSuggestions) time.Time { return value.expiresAt })
+	f.suggestionCache[key] = cachedFandangoSuggestions{movies: movies, expiresAt: now.Add(10 * time.Minute)}
+	f.cacheMu.Unlock()
 	f.markSuccess()
-	return suggestions, nil
+	return movies, nil
 }
 
 func (f *FandangoLocal) resolveMovie(ctx context.Context, query string) (fandangoMovie, error) {
@@ -331,7 +401,7 @@ func (f *FandangoLocal) resolveMovie(ctx context.Context, query string) (fandang
 	var best fandangoMovie
 	for _, candidate := range suggestions {
 		movie := fandangoMovie{ID: candidate.ID, Name: candidate.Title, ReleaseDate: candidate.ReleaseDate}
-		score := fandangoTitleScore(query, candidate.Title)
+		score := fandangoMovieScore(query, movie)
 		if score > bestScore {
 			bestScore = score
 			best = movie
@@ -351,13 +421,49 @@ func (f *FandangoLocal) resolveMovie(ctx context.Context, query string) (fandang
 func (f *FandangoLocal) discoverDate(ctx context.Context, movie fandangoMovie, date string, query domain.QueryRequest) ([]domain.Showtime, error) {
 	locationKey, parameters := fandangoLocationParameters(query.Location)
 	cacheKey := strings.Join([]string{movie.ID, date, locationKey, query.Time.Timezone}, "|")
-	now := f.now()
 	f.cacheMu.RLock()
 	cached, ok := f.discoveryCache[cacheKey]
 	f.cacheMu.RUnlock()
-	if ok && now.Before(cached.expiresAt) {
-		return cloneShowtimes(cached.showtimes), nil
+	if ok && f.now().Before(cached.expiresAt) {
+		return overlayFandangoMovieTitle(cached.showtimes, movie.Name), nil
 	}
+	read, leader := f.beginDiscoveryRead(cacheKey)
+	if leader {
+		f.cacheMu.RLock()
+		cached, ok = f.discoveryCache[cacheKey]
+		f.cacheMu.RUnlock()
+		if ok && f.now().Before(cached.expiresAt) {
+			f.finishDiscoveryRead(cacheKey, read, cached.showtimes, nil)
+		} else {
+			go func() {
+				readCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), fandangoDiscoveryReadTimeout)
+				defer cancel()
+				showtimes, err := f.readDiscoveryDate(readCtx, movie, date, query, parameters, cacheKey)
+				f.finishDiscoveryRead(cacheKey, read, showtimes, err)
+			}()
+		}
+	}
+	select {
+	case <-read.done:
+		if read.err != nil {
+			return nil, read.err
+		}
+		return overlayFandangoMovieTitle(read.showtimes, movie.Name), nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+func overlayFandangoMovieTitle(source []domain.Showtime, title string) []domain.Showtime {
+	showtimes := cloneShowtimes(source)
+	for index := range showtimes {
+		showtimes[index].MovieTitle = title
+	}
+	return showtimes
+}
+
+func (f *FandangoLocal) readDiscoveryDate(ctx context.Context, movie fandangoMovie, date string, query domain.QueryRequest, parameters url.Values, cacheKey string) ([]domain.Showtime, error) {
+	now := f.now()
 	parameters.Set("isdesktop", "true")
 	parameters.Set("isDesktopMOP", "true")
 	parameters.Set("partnerRestrictedTicketing", "false")
@@ -375,6 +481,46 @@ func (f *FandangoLocal) discoverDate(ctx context.Context, movie fandangoMovie, d
 	}
 	f.cacheMu.Unlock()
 	return showtimes, nil
+}
+
+func (f *FandangoLocal) beginDiscoveryRead(key string) (*fandangoDiscoveryRead, bool) {
+	f.flightMu.Lock()
+	defer f.flightMu.Unlock()
+	if read, ok := f.discoveryReads[key]; ok {
+		return read, false
+	}
+	read := &fandangoDiscoveryRead{done: make(chan struct{})}
+	f.discoveryReads[key] = read
+	return read, true
+}
+
+func (f *FandangoLocal) finishDiscoveryRead(key string, read *fandangoDiscoveryRead, showtimes []domain.Showtime, err error) {
+	f.flightMu.Lock()
+	read.showtimes = showtimes
+	read.err = err
+	delete(f.discoveryReads, key)
+	close(read.done)
+	f.flightMu.Unlock()
+}
+
+// PrefetchDiscovery warms the discovery cache (and joins any read already in flight) for a query
+// the user is still composing, so the search that follows starts at its seat-map reads.
+func (f *FandangoLocal) PrefetchDiscovery(ctx context.Context, query domain.QueryRequest) error {
+	f.prefetchMu.Lock()
+	if f.prefetchActive {
+		f.prefetchMu.Unlock()
+		return nil
+	}
+	f.prefetchActive = true
+	f.prefetchMu.Unlock()
+	defer func() {
+		f.prefetchMu.Lock()
+		f.prefetchActive = false
+		f.prefetchMu.Unlock()
+	}()
+	_, err := f.discoverWithLimit(ctx, query, 2)
+	return err
+
 }
 
 func (f *FandangoLocal) Supports(showtime domain.Showtime) bool {
@@ -403,21 +549,30 @@ func (f *FandangoLocal) GetAvailability(ctx context.Context, showtime domain.Sho
 		return cloneInventory(cached.inventory), nil
 	}
 	read, leader := f.beginInventoryRead(showtime.SeatLayoutID)
-	if !leader {
-		select {
-		case <-read.done:
-			return cloneInventory(read.inventory), read.err
-		case <-ctx.Done():
-			return domain.Inventory{}, ctx.Err()
-		}
+	if leader {
+		readCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), f.config.RequestTimeout)
+		f.flightMu.Lock()
+		read.cancel = cancel
+		f.flightMu.Unlock()
+		go func() {
+			defer cancel()
+			inventory, err := f.readAvailability(readCtx, showtime)
+			f.finishInventoryRead(showtime.SeatLayoutID, read, inventory, err)
+		}()
 	}
-	inventory, err := f.readAvailability(ctx, showtime)
-	f.finishInventoryRead(showtime.SeatLayoutID, read, inventory, err)
-	return inventory, err
+	select {
+	case <-read.done:
+		if read.err != nil {
+			return domain.Inventory{}, read.err
+		}
+		return cloneInventory(read.inventory), nil
+	case <-ctx.Done():
+		f.leaveInventoryRead(showtime.SeatLayoutID, read)
+		return domain.Inventory{}, ctx.Err()
+	}
 }
 
 func (f *FandangoLocal) readAvailability(ctx context.Context, showtime domain.Showtime) (domain.Inventory, error) {
-	now := f.now()
 	var response json.RawMessage
 	if err := f.getJSON(ctx, "/napi/seatMap/"+showtime.SeatLayoutID, nil, &response); err != nil {
 		return domain.Inventory{}, err
@@ -426,6 +581,7 @@ func (f *FandangoLocal) readAvailability(ctx context.Context, showtime domain.Sh
 	if err != nil {
 		return domain.Inventory{}, err
 	}
+	now := f.now()
 	inventory, err := normalizeFandangoInventory(showtime, seatMap, now.UTC())
 	if err != nil {
 		return domain.Inventory{}, err
@@ -445,18 +601,36 @@ func (f *FandangoLocal) beginInventoryRead(key string) (*fandangoInventoryRead, 
 	f.flightMu.Lock()
 	defer f.flightMu.Unlock()
 	if read, ok := f.inventoryReads[key]; ok {
+		read.waiters++
 		return read, false
 	}
-	read := &fandangoInventoryRead{done: make(chan struct{})}
+	read := &fandangoInventoryRead{done: make(chan struct{}), waiters: 1}
 	f.inventoryReads[key] = read
 	return read, true
+}
+
+func (f *FandangoLocal) leaveInventoryRead(key string, read *fandangoInventoryRead) {
+	f.flightMu.Lock()
+	defer f.flightMu.Unlock()
+	if f.inventoryReads[key] != read {
+		return
+	}
+	read.waiters--
+	if read.waiters == 0 {
+		delete(f.inventoryReads, key)
+		if read.cancel != nil {
+			read.cancel()
+		}
+	}
 }
 
 func (f *FandangoLocal) finishInventoryRead(key string, read *fandangoInventoryRead, inventory domain.Inventory, err error) {
 	f.flightMu.Lock()
 	read.inventory = cloneInventory(inventory)
 	read.err = err
-	delete(f.inventoryReads, key)
+	if f.inventoryReads[key] == read {
+		delete(f.inventoryReads, key)
+	}
 	close(read.done)
 	f.flightMu.Unlock()
 }
@@ -484,8 +658,8 @@ func (f *FandangoLocal) getJSON(ctx context.Context, path string, query url.Valu
 		request.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/138 Safari/537.36")
 		request.Header.Set("X-Requested-With", "XMLHttpRequest")
 		response, err := f.client.Do(request)
-		f.releaseRequestSlot()
 		if err != nil {
+			f.releaseRequestSlot()
 			if attempt < 2 && ctx.Err() == nil {
 				if retryErr := waitForFandangoRetry(ctx, attempt); retryErr != nil {
 					return retryErr
@@ -494,8 +668,12 @@ func (f *FandangoLocal) getJSON(ctx context.Context, path string, query url.Valu
 			}
 			return fmt.Errorf("Fandango read failed: %w", err)
 		}
+		if response.StatusCode == http.StatusTooManyRequests {
+			f.setCooldown(response.Header.Get("Retry-After"), attempt)
+		}
 		body, readErr := io.ReadAll(io.LimitReader(response.Body, 16<<20))
 		_ = response.Body.Close()
+		f.releaseRequestSlot()
 		if readErr != nil {
 			if attempt < 2 && ctx.Err() == nil {
 				if retryErr := waitForFandangoRetry(ctx, attempt); retryErr != nil {
@@ -537,24 +715,55 @@ func (f *FandangoLocal) waitForRequestSlot(ctx context.Context) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	}
-	f.throttleMu.Lock()
-	wait := time.Until(f.lastStart.Add(f.config.MinimumDelay))
-	if wait > 0 {
+	for {
+		f.throttleMu.Lock()
+		deadline := f.lastStart.Add(f.config.MinimumDelay)
+		if f.cooldownUntil.After(deadline) {
+			deadline = f.cooldownUntil
+		}
+		wait := time.Until(deadline)
+		if wait <= 0 {
+			f.lastStart = time.Now()
+			f.throttleMu.Unlock()
+			return nil
+		}
+		if callerDeadline, ok := ctx.Deadline(); ok && !callerDeadline.After(deadline) {
+			f.throttleMu.Unlock()
+			f.releaseRequestSlot()
+			return errors.New("Fandango provider rate limit cooldown exceeds caller deadline")
+		}
+		f.throttleMu.Unlock()
 		timer := time.NewTimer(wait)
 		select {
 		case <-timer.C:
 		case <-ctx.Done():
 			if !timer.Stop() {
-				<-timer.C
+				select {
+				case <-timer.C:
+				default:
+				}
 			}
-			f.throttleMu.Unlock()
 			f.releaseRequestSlot()
 			return ctx.Err()
 		}
 	}
-	f.lastStart = time.Now()
+}
+
+func (f *FandangoLocal) setCooldown(retryAfter string, attempt int) {
+	deadline := time.Time{}
+	if seconds, err := strconv.Atoi(strings.TrimSpace(retryAfter)); err == nil && seconds >= 0 {
+		deadline = time.Now().Add(time.Duration(seconds) * time.Second)
+	} else if parsed, err := http.ParseTime(retryAfter); err == nil {
+		deadline = parsed
+	} else {
+		backoff := time.Duration(200*(1<<attempt))*time.Millisecond + time.Duration(rand.Int64N(250))*time.Millisecond
+		deadline = time.Now().Add(backoff)
+	}
+	f.throttleMu.Lock()
+	if deadline.After(f.cooldownUntil) {
+		f.cooldownUntil = deadline
+	}
 	f.throttleMu.Unlock()
-	return nil
 }
 
 func (f *FandangoLocal) releaseRequestSlot() { <-f.gate }
@@ -569,7 +778,7 @@ func retryableReadStatus(status int) bool {
 }
 
 func waitForFandangoRetry(ctx context.Context, attempt int) error {
-	delay := time.Duration(150*(1<<attempt))*time.Millisecond + retryJitter()
+	delay := time.Duration(150*(1<<attempt))*time.Millisecond + time.Duration(rand.Int64N(100))*time.Millisecond
 	timer := time.NewTimer(delay)
 	defer timer.Stop()
 	select {
@@ -652,8 +861,8 @@ func normalizeFandangoMovie(source fandangoAutocompleteMovie) (fandangoMovie, bo
 }
 
 func fandangoTitleScore(query, candidate string) int {
-	query = normalizeText(query)
-	candidate = normalizeText(candidate)
+	query = strings.TrimSpace(fandangoTitleYear.ReplaceAllString(normalizeText(query), ""))
+	candidate = strings.TrimSpace(fandangoTitleYear.ReplaceAllString(normalizeText(candidate), ""))
 	compactQuery := strings.ReplaceAll(query, " ", "")
 	compactCandidate := strings.ReplaceAll(candidate, " ", "")
 	switch {
@@ -676,6 +885,23 @@ func fandangoTitleScore(query, candidate string) int {
 	default:
 		return -1
 	}
+}
+
+func fandangoMovieScore(query string, movie fandangoMovie) int {
+	normalizedQuery := normalizeText(query)
+	yearMatch := fandangoTitleYear.FindString(normalizedQuery)
+	score := fandangoTitleScore(query, movie.Name)
+	if yearMatch == "" {
+		return score
+	}
+	requestedYear := strings.TrimSpace(yearMatch)
+	if len(movie.ReleaseDate) >= 4 && movie.ReleaseDate[:4] == requestedYear[len(requestedYear)-4:] {
+		return score + 2000
+	}
+	if len(movie.ReleaseDate) < 4 {
+		return score - 1000
+	}
+	return score - 2000
 }
 
 type fandangoShowtimeGroupingsResponse struct {

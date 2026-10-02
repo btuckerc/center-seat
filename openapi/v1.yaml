@@ -83,6 +83,31 @@ paths:
           $ref: "#/components/responses/Problem"
         "503":
           $ref: "#/components/responses/Problem"
+  /v1/discovery-prefetch:
+    post:
+      operationId: prefetchDiscovery
+      summary: Warm showtime discovery for a query that is still being composed
+      description: >-
+        Runs only the discovery half of the query (location resolution and showtime listings) so a
+        provider with a listing cache answers the following seat or showtime query faster. It never
+        reads seat maps, stores no query result, and is a no-op for providers without a listing
+        cache. The server admits one speculative prefetch at a time; a request arriving while one
+        runs returns 204 without doing work.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SeatQueryRequest"
+      responses:
+        "204":
+          description: Discovery was warmed, or skipped because it cannot help
+        "400":
+          $ref: "#/components/responses/Problem"
+        "422":
+          $ref: "#/components/responses/Problem"
+        "503":
+          $ref: "#/components/responses/Problem"
   /v1/seat-queries:
     post:
       operationId: createSeatQuery
@@ -350,11 +375,11 @@ components:
       type: object
       additionalProperties: false
       required: [radius_miles]
-      description: Supply latitude and longitude together, or a provider-supported coarse query such as a US ZIP code.
+      description: Supply latitude and longitude together, or a free-text city, postal code, neighborhood, or street address. Text is resolved by the service before provider discovery; prefer a ZIP when a city name is ambiguous.
       properties:
         query:
           type: string
-          description: City, postal code, neighborhood, or address.
+          description: City, postal code, neighborhood, or address. The service resolves free text to coordinates; use a ZIP when a city name is ambiguous.
         latitude:
           type: number
           minimum: -90
@@ -421,6 +446,8 @@ components:
           type: string
           format: date-time
           description: Retention deadline for refreshing recommendations; later requests return 410.
+        resolved_location:
+          $ref: "#/components/schemas/ResolvedLocation"
         coverage:
           $ref: "#/components/schemas/Coverage"
         winner:
@@ -450,6 +477,8 @@ components:
         expires_at:
           type: string
           format: date-time
+        resolved_location:
+          $ref: "#/components/schemas/ResolvedLocation"
         coverage:
           $ref: "#/components/schemas/Coverage"
         showtimes:
@@ -475,6 +504,8 @@ components:
         expires_at:
           type: string
           format: date-time
+        resolved_location:
+          $ref: "#/components/schemas/ResolvedLocation"
         coverage:
           $ref: "#/components/schemas/Coverage"
         showtimes:
@@ -740,10 +771,20 @@ components:
           type: string
         location_mode:
           type: string
-          enum: [coordinates, postal_or_coordinates]
+          enum: [coordinates, postal_or_coordinates, text_or_coordinates]
         last_success_at:
           type: string
           format: date-time
+    ResolvedLocation:
+      type: object
+      required: [label, latitude, longitude]
+      properties:
+        label:
+          type: string
+        latitude:
+          type: number
+        longitude:
+          type: number
     MovieSuggestion:
       type: object
       required: [id, title]

@@ -5,30 +5,33 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
 
 	"centerseat/backend/internal/domain"
+	"centerseat/backend/internal/geocode"
 	"centerseat/backend/internal/providers"
 	"centerseat/backend/internal/ranking"
 )
 
 var (
-	ErrScreeningStarted = errors.New("screening started or is inside the minimum start notice")
-	ErrSeatsUnavailable = errors.New("the selected screening no longer has an eligible seat block")
-	ErrPriceExceeded    = errors.New("live ticket price exceeded the query constraint or was unavailable")
+	ErrScreeningStarted  = errors.New("screening started or is inside the minimum start notice")
+	ErrSeatsUnavailable  = errors.New("the selected screening no longer has an eligible seat block")
+	ErrPriceExceeded     = errors.New("live ticket price exceeded the query constraint or was unavailable")
+	ErrLocationNotFound  = errors.New("location not found; use a ZIP code or coordinates")
+	postalCodeInLocation = regexp.MustCompile(`\b[0-9]{5}\b`)
 )
 
 type Service struct {
 	discovery providers.Discovery
 	inventory providers.Inventory
+	resolver  geocode.Resolver
 	fanout    int
 	// now decides which screenings have started and stamps result expiry; tests pin it.
 	now func() time.Time
 }
-
-const adaptiveInitialCandidates = 4
 
 type inventoryCandidateResult struct {
 	index          int
@@ -36,10 +39,12 @@ type inventoryCandidateResult struct {
 	outcome        string
 	failureReason  string
 	dateKey        string
-	upperBound     float64
 }
 
-func New(discovery providers.Discovery, inventory providers.Inventory, fanout int) *Service {
+// alternativesEnvelope is the winner plus four mapless alternatives.
+const alternativesEnvelope = 5
+
+func New(discovery providers.Discovery, inventory providers.Inventory, fanout int, resolver geocode.Resolver) *Service {
 	if fanout < 1 {
 		fanout = 6
 	}
@@ -48,21 +53,26 @@ func New(discovery providers.Discovery, inventory providers.Inventory, fanout in
 			fanout = providerLimit
 		}
 	}
-	return &Service{discovery: discovery, inventory: inventory, fanout: fanout, now: time.Now}
+	return &Service{discovery: discovery, inventory: inventory, resolver: resolver, fanout: fanout, now: time.Now}
 }
 
 func (s *Service) ProviderStatuses() []domain.ProviderStatus {
 	if reporter, ok := s.discovery.(providers.StatusReporter); ok {
 		discovery := reporter.ProviderStatus("discovery")
+		if s.resolver != nil {
+			discovery.LocationMode = "text_or_coordinates"
+		}
 		if inventoryReporter, ok := s.inventory.(providers.StatusReporter); ok {
 			return []domain.ProviderStatus{discovery, inventoryReporter.ProviderStatus("inventory")}
 		}
 		return []domain.ProviderStatus{discovery}
 	}
-	return []domain.ProviderStatus{
-		{Name: s.discovery.Name(), Kind: "discovery", Status: "degraded", Configured: true, Message: "Provider does not report health"},
-		{Name: s.inventory.Name(), Kind: "inventory", Status: "degraded", Configured: true, Message: "Provider does not report health"},
+	discovery := domain.ProviderStatus{Name: s.discovery.Name(), Kind: "discovery", Status: "degraded", Configured: true, Message: "Provider does not report health"}
+	inventory := domain.ProviderStatus{Name: s.inventory.Name(), Kind: "inventory", Status: "degraded", Configured: true, Message: "Provider does not report health"}
+	if s.resolver != nil {
+		discovery.LocationMode = "text_or_coordinates"
 	}
+	return []domain.ProviderStatus{discovery, inventory}
 }
 
 func (s *Service) MovieSuggestions(ctx context.Context, query string, limit int) ([]domain.MovieSuggestion, error) {
@@ -80,6 +90,26 @@ func (s *Service) MovieSuggestions(ctx context.Context, query string, limit int)
 	requestCtx, cancel := context.WithTimeout(ctx, 4*time.Second)
 	defer cancel()
 	return suggester.SuggestMovies(requestCtx, query, limit)
+}
+
+// PrefetchDiscovery runs the discovery half of a query the user is still composing so a caching
+// provider has the showtime lists ready when the search is submitted. It never reads seat maps.
+// Providers without a discovery cache are skipped.
+func (s *Service) PrefetchDiscovery(ctx context.Context, q domain.QueryRequest) error {
+	prefetcher, ok := s.discovery.(providers.DiscoveryPrefetcher)
+	if !ok {
+		return nil
+	}
+	q.SetDefaults()
+	if err := q.Validate(); err != nil {
+		return err
+	}
+	if _, err := s.resolveLocation(ctx, &q); err != nil {
+		return err
+	}
+	discoveryCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
+	defer cancel()
+	return prefetcher.PrefetchDiscovery(discoveryCtx, q)
 }
 
 func (s *Service) RefreshRecommendation(ctx context.Context, source domain.Recommendation, q domain.QueryRequest) (domain.Recommendation, error) {
@@ -110,6 +140,10 @@ func (s *Service) Query(ctx context.Context, queryID string, q domain.QueryReque
 	if err := q.Validate(); err != nil {
 		return domain.QueryResponse{}, err
 	}
+	resolved, err := s.resolveLocation(ctx, &q)
+	if err != nil {
+		return domain.QueryResponse{}, err
+	}
 	discoveryStarted := time.Now()
 	discoveryCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
 	showtimes, err := s.discovery.Discover(discoveryCtx, q)
@@ -126,7 +160,7 @@ func (s *Service) Query(ctx context.Context, queryID string, q domain.QueryReque
 	if len(eligibleShowtimes) == 0 {
 		now := s.now().UTC()
 		coverage.ElapsedMS = int(time.Since(started).Milliseconds())
-		return domain.QueryResponse{QueryID: queryID, Status: "no_match", GeneratedAt: now, ExpiresAt: now.Add(30 * time.Second), Coverage: coverage, Alternatives: []domain.Recommendation{}, Warnings: []string{"No screenings matched every hard constraint"}}, nil
+		return domain.QueryResponse{QueryID: queryID, Status: "no_match", GeneratedAt: now, ExpiresAt: now.Add(30 * time.Second), ResolvedLocation: resolved, Coverage: coverage, Alternatives: []domain.Recommendation{}, Warnings: []string{"No screenings matched every hard constraint"}}, nil
 	}
 	candidates := eligibleShowtimes
 	if len(candidates) > q.CandidateLimit {
@@ -136,69 +170,90 @@ func (s *Service) Query(ctx context.Context, queryID string, q domain.QueryReque
 	recommendations := make([]domain.Recommendation, 0, len(candidates))
 	dateTargets := minimumDateCoverage(eligibleShowtimes, q, 2)
 	successfulByDate := map[string]int{}
-	failedUpperBounds := make([]float64, 0)
+	failedUpperBounds := make([]domain.Showtime, 0)
 	processed := make([]bool, len(eligibleShowtimes))
 	inventoryStarted := time.Now()
-	pipelineCtx, stopPipeline := context.WithCancel(ctx)
-	results := make(chan inventoryCandidateResult, len(candidates))
-	next, inFlight := 0, 0
-	schedule := func() {
-		index := next
-		next++
-		inFlight++
-		go func() { results <- s.evaluateInventoryCandidate(pipelineCtx, index, candidates[index], q) }()
+	candidateDates := make([]string, len(candidates))
+	for index, showtime := range candidates {
+		candidateDates[index] = showtimeDateKey(showtime.StartsAt, q)
 	}
-	initial := adaptiveInitialCandidates
-	if initial > len(candidates) {
-		initial = len(candidates)
-	}
-	for next < initial {
-		schedule()
-	}
-	expanded := false
-	for inFlight > 0 {
-		candidate := <-results
-		inFlight--
-		processed[candidate.index] = true
-		coverage.InventoriesChecked++
-		switch candidate.outcome {
-		case "failed":
-			coverage.InventoriesFailed++
-			coverage.InventoryFailureReasons[candidate.failureReason]++
-			failedUpperBounds = append(failedUpperBounds, candidate.upperBound)
-		case "not_available":
-			successfulByDate[candidate.dateKey]++
-			coverage.ScreeningsUnavailable++
-		case "price_rejected":
-			coverage.InventoriesFresh++
-			successfulByDate[candidate.dateKey]++
-			coverage.ScreeningsPriceRejected++
-		case "unavailable":
-			coverage.InventoriesFresh++
-			successfulByDate[candidate.dateKey]++
-			coverage.ScreeningsUnavailable++
-		case "recommended":
-			coverage.InventoriesFresh++
-			successfulByDate[candidate.dateKey]++
-			recommendations = append(recommendations, candidate.recommendation)
-		}
-		coverage.DatesCompared = len(successfulByDate)
-		sortRecommendations(recommendations)
-		remaining := unprocessedShowtimes(eligibleShowtimes, processed)
-		if adaptiveCoverageIsConclusive(coverage, recommendations, dateCoverageSatisfied(successfulByDate, dateTargets), remaining, failedUpperBounds, q) {
-			stopPipeline()
-			break
-		}
-		if !expanded && inFlight == 0 {
-			expanded = true
-		}
-		if expanded && pipelineCtx.Err() == nil {
-			for next < len(candidates) && inFlight < s.fanout {
-				schedule()
+	// scheduled marks reads started and not abandoned. A conclusive stop abandons in-flight reads
+	// and unmarks them, so final verification can resume the pipeline if it lowers the leader.
+	scheduled := make([]bool, len(candidates))
+	// runPipeline keeps every provider slot busy with screenings that can still matter: one that
+	// could outrank the leader, one its date needs for coverage, or any while fewer than five
+	// results exist to fill the winner and alternatives. The leader only rises while reads
+	// complete, so a skipped screening stays ruled out until verification lowers the leader.
+	runPipeline := func() {
+		runCtx, cancelRun := context.WithCancel(ctx)
+		defer cancelRun()
+		results := make(chan inventoryCandidateResult, len(candidates))
+		inFlightByDate := map[string]int{}
+		inFlight := 0
+		fill := func() {
+			for index := range candidates {
+				if inFlight >= s.fanout {
+					return
+				}
+				date := candidateDates[index]
+				if scheduled[index] || len(recommendations) >= alternativesEnvelope && !screeningCanMatter(candidates[index], recommendations, successfulByDate[date]+inFlightByDate[date], dateTargets[date], q) {
+					continue
+				}
+				scheduled[index] = true
+				inFlight++
+				inFlightByDate[date]++
+				go func() { results <- s.evaluateInventoryCandidate(runCtx, index, candidates[index], q) }()
 			}
 		}
+		fill()
+		for inFlight > 0 {
+			candidate := <-results
+			inFlight--
+			inFlightByDate[candidate.dateKey]--
+			if ctx.Err() != nil {
+				return
+			}
+			processed[candidate.index] = true
+			coverage.InventoriesChecked++
+			switch candidate.outcome {
+			case "failed":
+				coverage.InventoriesFailed++
+				coverage.InventoryFailureReasons[candidate.failureReason]++
+				failedUpperBounds = append(failedUpperBounds, candidates[candidate.index])
+			case "not_available":
+				successfulByDate[candidate.dateKey]++
+				coverage.ScreeningsUnavailable++
+			case "price_rejected":
+				coverage.InventoriesFresh++
+				successfulByDate[candidate.dateKey]++
+				coverage.ScreeningsPriceRejected++
+			case "unavailable":
+				coverage.InventoriesFresh++
+				successfulByDate[candidate.dateKey]++
+				coverage.ScreeningsUnavailable++
+			case "recommended":
+				coverage.InventoriesFresh++
+				successfulByDate[candidate.dateKey]++
+				recommendations = append(recommendations, candidate.recommendation)
+			}
+			coverage.DatesCompared = len(successfulByDate)
+			sortRecommendations(recommendations)
+			remaining := unprocessedShowtimes(eligibleShowtimes, processed)
+			if len(recommendations) >= alternativesEnvelope && adaptiveCoverageIsConclusive(coverage, recommendations, dateCoverageSatisfied(successfulByDate, dateTargets), remaining, failedUpperBounds, q) {
+				for index := range candidates {
+					if scheduled[index] && !processed[index] {
+						scheduled[index] = false
+					}
+				}
+				return
+			}
+			fill()
+		}
 	}
-	stopPipeline()
+	runPipeline()
+	if err := ctx.Err(); err != nil {
+		return domain.QueryResponse{}, fmt.Errorf("seat query canceled: %w", err)
+	}
 	coverage.InventoryMS = int(time.Since(inventoryStarted).Milliseconds())
 	coverage.ProvidersDegraded = coverage.InventoriesFailed
 	status := "complete"
@@ -235,23 +290,30 @@ func (s *Service) Query(ctx context.Context, queryID string, q domain.QueryReque
 		if !priceOK {
 			warnings = append(warnings, fmt.Sprintf("%s changed during final verification, so the next ranked screening was promoted", recommendations[0].Showtime.VenueName))
 			recommendations = recommendations[1:]
+			runPipeline()
 			continue
 		}
 		verified, seatsOK := ranking.BestBlock(showtime, fresh, q)
 		if !seatsOK {
 			warnings = append(warnings, fmt.Sprintf("%s changed during final verification, so the next ranked screening was promoted", recommendations[0].Showtime.VenueName))
 			recommendations = recommendations[1:]
+			runPipeline()
 			continue
 		}
 		verified.Score = combinedScore(verified.Score, verified.Showtime, q)
 		recommendations[0] = verified
 		verifiedShowtimes[winnerID] = true
 		sortRecommendations(recommendations)
+		runPipeline()
+		sortRecommendations(recommendations)
 		if recommendations[0].Showtime.ID == winnerID {
 			coverage.WinnerVerified = true
 			break
 		}
 		warnings = append(warnings, fmt.Sprintf("%s changed rank during final verification, so the new leader was checked too", verified.Showtime.VenueName))
+	}
+	if err := ctx.Err(); err != nil {
+		return domain.QueryResponse{}, fmt.Errorf("seat query canceled: %w", err)
 	}
 	if len(recommendations) == 0 {
 		status = "no_match"
@@ -264,26 +326,22 @@ func (s *Service) Query(ctx context.Context, queryID string, q domain.QueryReque
 		if status != "no_match" {
 			status = "partial"
 		}
-		remainingCount := len(remaining)
 		if coverage.InventoriesFailed > 0 {
 			warnings = append(warnings, inventoryFailureWarning())
-		} else if remainingCount > 0 {
-			warnings = append(warnings, fmt.Sprintf("This is the best of %d live screenings compared, but %d additional matching screenings could not be ruled out within the automatic safety limit", coverage.InventoriesFresh, remainingCount))
+		} else if unresolved := unresolvedScreenings(remaining, recommendations, successfulByDate, dateTargets, q); unresolved > 0 {
+			warnings = append(warnings, fmt.Sprintf("This is the best of %d live screenings compared, but %d additional matching screenings could not be ruled out within the automatic safety limit", coverage.InventoriesFresh, unresolved))
 		}
 	}
 
 	now := s.now().UTC()
 	coverage.ElapsedMS = int(time.Since(started).Milliseconds())
-	response := domain.QueryResponse{QueryID: queryID, Status: status, GeneratedAt: now, ExpiresAt: now.Add(8 * time.Second), RefreshUntil: now.Add(15 * time.Minute), Coverage: coverage, Alternatives: []domain.Recommendation{}, Warnings: warnings}
+	response := domain.QueryResponse{QueryID: queryID, Status: status, GeneratedAt: now, ExpiresAt: now.Add(8 * time.Second), RefreshUntil: now.Add(15 * time.Minute), ResolvedLocation: resolved, Coverage: coverage, Alternatives: []domain.Recommendation{}, Warnings: warnings}
 	if len(recommendations) > 0 {
 		for i := range recommendations {
 			recommendations[i].Rank = i + 1
 		}
 		response.Winner = &recommendations[0]
-		limit := len(recommendations)
-		if limit > 5 {
-			limit = 5
-		}
+		limit := min(len(recommendations), alternativesEnvelope)
 		if limit > 1 {
 			response.Alternatives = append([]domain.Recommendation(nil), recommendations[1:limit]...)
 			for i := range response.Alternatives {
@@ -318,7 +376,7 @@ func unprocessedShowtimes(showtimes []domain.Showtime, processed []bool) []domai
 
 func (s *Service) evaluateInventoryCandidate(ctx context.Context, index int, showtime domain.Showtime, q domain.QueryRequest) inventoryCandidateResult {
 	date := showtimeDateKey(showtime.StartsAt, q)
-	base := inventoryCandidateResult{index: index, dateKey: date, upperBound: maximumPossibleScore(showtime, q)}
+	base := inventoryCandidateResult{index: index, dateKey: date}
 	if !s.inventory.Supports(showtime) {
 		base.outcome = "failed"
 		base.failureReason = "provider_error"
@@ -353,22 +411,55 @@ func (s *Service) evaluateInventoryCandidate(ctx context.Context, index int, sho
 	return base
 }
 
-func adaptiveCoverageIsConclusive(coverage domain.Coverage, recommendations []domain.Recommendation, dateCoverageComplete bool, unchecked []domain.Showtime, failedUpperBounds []float64, q domain.QueryRequest) bool {
+func adaptiveCoverageIsConclusive(coverage domain.Coverage, recommendations []domain.Recommendation, dateCoverageComplete bool, unchecked []domain.Showtime, failedUpperBounds []domain.Showtime, q domain.QueryRequest) bool {
 	if !dateCoverageComplete || coverage.InventoriesFresh == 0 || len(recommendations) == 0 {
 		return false
 	}
-	best := recommendations[0].Score
 	for _, showtime := range unchecked {
-		if maximumPossibleScore(showtime, q) > best {
+		if candidateCouldOutrankLeader(showtime, recommendations, q) {
 			return false
 		}
 	}
-	for _, upperBound := range failedUpperBounds {
-		if upperBound > best {
+	for _, showtime := range failedUpperBounds {
+		if candidateCouldOutrankLeader(showtime, recommendations, q) {
 			return false
 		}
 	}
 	return true
+}
+
+// candidateCouldOutrankLeader reports whether an unread or failed screening could still be ranked
+// ahead of the leader by sortRecommendations: a higher score bound, or an equal bound that the
+// start-time and ID tiebreaks would place first. Pruning and the range proof both use it.
+func candidateCouldOutrankLeader(showtime domain.Showtime, recommendations []domain.Recommendation, q domain.QueryRequest) bool {
+	if len(recommendations) == 0 {
+		return true
+	}
+	leader := recommendations[0]
+	upperBound := maximumPossibleScore(showtime, q)
+	if upperBound != leader.Score {
+		return upperBound > leader.Score
+	}
+	if !showtime.StartsAt.Equal(leader.Showtime.StartsAt) {
+		return showtime.StartsAt.Before(leader.Showtime.StartsAt)
+	}
+	return showtime.ID < leader.Showtime.ID
+}
+
+// screeningCanMatter includes candidates that are still needed for date coverage.
+func screeningCanMatter(showtime domain.Showtime, recommendations []domain.Recommendation, dateReads, dateTarget int, q domain.QueryRequest) bool {
+	return candidateCouldOutrankLeader(showtime, recommendations, q) || dateReads < dateTarget
+}
+
+func unresolvedScreenings(unchecked []domain.Showtime, recommendations []domain.Recommendation, successfulByDate, dateTargets map[string]int, q domain.QueryRequest) int {
+	count := 0
+	for _, showtime := range unchecked {
+		date := showtimeDateKey(showtime.StartsAt, q)
+		if screeningCanMatter(showtime, recommendations, successfulByDate[date], dateTargets[date], q) {
+			count++
+		}
+	}
+	return count
 }
 
 func inventoryFailureReason(err error) string {
@@ -423,6 +514,10 @@ func (s *Service) Showtimes(ctx context.Context, queryID string, q domain.QueryR
 	if err := q.Validate(); err != nil {
 		return domain.ShowtimeQueryResponse{}, err
 	}
+	resolved, err := s.resolveLocation(ctx, &q)
+	if err != nil {
+		return domain.ShowtimeQueryResponse{}, err
+	}
 	discoveryStarted := time.Now()
 	discoveryCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
 	showtimes, err := s.discovery.Discover(discoveryCtx, q)
@@ -443,6 +538,7 @@ func (s *Service) Showtimes(ctx context.Context, queryID string, q domain.QueryR
 	}
 	return domain.ShowtimeQueryResponse{
 		QueryID: queryID, Status: status, GeneratedAt: now, ExpiresAt: now.Add(5 * time.Minute),
+		ResolvedLocation: resolved,
 		Coverage: domain.Coverage{
 			DatesRequested:       dateRangeDays(q.Dates),
 			DatesWithScreenings:  distinctShowtimeDates(filtered, q),
@@ -453,6 +549,24 @@ func (s *Service) Showtimes(ctx context.Context, queryID string, q domain.QueryR
 		},
 		Showtimes: filtered, Warnings: warnings,
 	}, nil
+}
+
+func (s *Service) resolveLocation(ctx context.Context, q *domain.QueryRequest) (*domain.ResolvedLocation, error) {
+	if q.Location.Latitude != 0 || q.Location.Longitude != 0 || q.Location.Query == "" || s.resolver == nil {
+		return nil, nil
+	}
+	place, err := s.resolver.Resolve(ctx, q.Location.Query)
+	if err != nil {
+		if postalCodeInLocation.MatchString(q.Location.Query) {
+			return nil, nil
+		}
+		if errors.Is(err, geocode.ErrNotFound) {
+			return nil, ErrLocationNotFound
+		}
+		return nil, fmt.Errorf("resolve location: %w", err)
+	}
+	q.Location.Latitude, q.Location.Longitude = place.Latitude, place.Longitude
+	return &domain.ResolvedLocation{Label: place.Label, Latitude: place.Latitude, Longitude: place.Longitude}, nil
 }
 
 // earliestStart is the first start instant a screening may have: already-started screenings and
@@ -625,14 +739,16 @@ func matchesTime(t time.Time, constraint domain.TimeConstraint) bool {
 }
 
 func applyInventoryPricing(showtime domain.Showtime, inventory domain.Inventory, query domain.QueryRequest) (domain.Showtime, bool) {
-	if showtime.TotalPrice == nil && inventory.TicketPrice != nil {
-		fee := 0.0
+	if inventory.TicketPrice != nil {
+		perTicket := *inventory.TicketPrice
 		if inventory.TicketFee != nil {
-			fee = *inventory.TicketFee
+			perTicket += *inventory.TicketFee
 		}
-		total := math.Round((*inventory.TicketPrice+fee)*float64(query.TicketCount)*100) / 100
+		total := math.Round(perTicket*float64(query.TicketCount)*100) / 100
 		showtime.TotalPrice = &total
-		showtime.Currency = inventory.Currency
+		if inventory.Currency != "" {
+			showtime.Currency = inventory.Currency
+		}
 	}
 	if query.MaxTotalPrice == nil {
 		return showtime, true

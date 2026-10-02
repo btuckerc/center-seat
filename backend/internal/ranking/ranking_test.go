@@ -10,6 +10,33 @@ import (
 	"centerseat/backend/internal/domain"
 )
 
+func TestBestBlockIncludesExactPriceEstimateAndUnknownFees(t *testing.T) {
+	price, fee := 15.0, 2.5
+	inventory := domain.Inventory{
+		Confidence: "exact_coordinates", TicketPrice: &price, TicketFee: &fee, Currency: "USD",
+		ObservedAt: time.Date(2026, 10, 2, 12, 0, 0, 0, time.UTC),
+		Seats: []domain.Seat{
+			{ID: "a1", Label: "E1", Row: "E", Index: 0, X: .46, Y: .60, Type: "recliner", Status: "available"},
+			{ID: "a2", Label: "E2", Row: "E", Index: 1, X: .54, Y: .60, Type: "recliner", Status: "available"},
+		},
+	}
+	got, ok := BestBlock(domain.Showtime{ID: "s1"}, inventory, domain.QueryRequest{TicketCount: 2, SeatProfile: "balanced"})
+	if !ok {
+		t.Fatal("expected a recommendation")
+	}
+	if got.Price.TicketCount != 2 || got.Price.Currency == nil || *got.Price.Currency != "USD" ||
+		got.Price.TicketPrice == nil || *got.Price.TicketPrice != 15 || got.Price.FeePerTicket == nil ||
+		*got.Price.FeePerTicket != 2.5 || got.Price.EstimatedTotal == nil || *got.Price.EstimatedTotal != 35 ||
+		!got.Price.FeesIncluded || !got.Price.IsEstimate {
+		t.Fatalf("incorrect estimate: %#v", got.Price)
+	}
+	inventory.TicketFee = nil
+	got, ok = BestBlock(domain.Showtime{ID: "s1"}, inventory, domain.QueryRequest{TicketCount: 2, SeatProfile: "balanced"})
+	if !ok || got.Price.FeePerTicket != nil || got.Price.FeesIncluded || got.Price.EstimatedTotal == nil || *got.Price.EstimatedTotal != 30 {
+		t.Fatalf("unknown provider fee was treated as zero or omitted from the estimate: %#v", got.Price)
+	}
+}
+
 func TestBestBlockUsesGeometryAndContiguity(t *testing.T) {
 	showtime := domain.Showtime{ID: "s1"}
 	inventory := domain.Inventory{Confidence: "exact_coordinates", ObservedAt: time.Now(), Seats: []domain.Seat{

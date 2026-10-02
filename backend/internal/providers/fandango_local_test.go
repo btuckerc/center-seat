@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -72,12 +73,14 @@ func TestFandangoLocalReadOnlyDiscoveryAndInventory(t *testing.T) {
 	}))
 	defer server.Close()
 
+	now := time.Date(2026, time.October, 2, 12, 0, 0, 0, time.UTC)
 	provider, err := NewFandangoLocal(FandangoLocalConfig{
 		BaseURL: server.URL, RequestTimeout: time.Second, MinimumDelay: time.Millisecond, MaxConcurrency: 2,
 	}, server.Client())
 	if err != nil {
 		t.Fatal(err)
 	}
+	provider.now = func() time.Time { return now }
 	if err := provider.Check(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -127,14 +130,24 @@ func TestFandangoLocalReadOnlyDiscoveryAndInventory(t *testing.T) {
 		inventory.TicketFee == nil || *inventory.TicketFee != 2.5 || inventory.Currency != "USD" {
 		t.Fatalf("adult price and fee were not normalized: %#v", inventory)
 	}
-	if _, err := provider.GetAvailability(context.Background(), first, false); err != nil {
+	now = now.Add(time.Second)
+	cached, err := provider.GetAvailability(context.Background(), first, false)
+	if err != nil {
 		t.Fatal(err)
+	}
+	if cached.ObservedAt != inventory.ObservedAt {
+		t.Fatalf("cached inventory restamped observation: first=%s cached=%s", inventory.ObservedAt, cached.ObservedAt)
 	}
 	if seatMapReads.Load() != 1 {
 		t.Fatalf("fresh inventory was not cached, reads=%d", seatMapReads.Load())
 	}
-	if _, err := provider.GetAvailability(context.Background(), first, true); err != nil {
+	now = now.Add(time.Minute)
+	refreshed, err := provider.GetAvailability(context.Background(), first, true)
+	if err != nil {
 		t.Fatal(err)
+	}
+	if refreshed.ObservedAt.Equal(inventory.ObservedAt) {
+		t.Fatalf("live refresh retained cached timestamp %s", refreshed.ObservedAt)
 	}
 	if seatMapReads.Load() != 2 {
 		t.Fatalf("final verification did not bypass the cache, reads=%d", seatMapReads.Load())
@@ -442,5 +455,450 @@ func TestFandangoDiscoveryCacheIncludesTimezoneAndIsBounded(t *testing.T) {
 	}
 	if len(cache) > 500 {
 		t.Fatalf("cache exceeded cap: %d", len(cache))
+	}
+}
+
+func TestFandangoTitleScoringPrefersExactTitlesAndYears(t *testing.T) {
+	movies := []fandangoMovie{
+		{ID: "exact", Name: "Dune: Part Two", ReleaseDate: "2024-03-01"},
+		{ID: "event", Name: "Dune: Part Two Fan Event", ReleaseDate: "2024-03-01"},
+		{ID: "sequel", Name: "Dune: Part Three", ReleaseDate: "2027-01-01"},
+		{ID: "rerelease", Name: "Dune: Part Two", ReleaseDate: "2025-01-01"},
+	}
+	for _, query := range []string{"Dune: Part Two (2024)", "Dune Part Two 2024"} {
+		if got := fandangoMovieScore(query, movies[0]); got <= fandangoMovieScore(query, movies[1]) ||
+			got <= fandangoMovieScore(query, movies[2]) || got <= fandangoMovieScore(query, movies[3]) {
+			t.Fatalf("exact title/year failed to win for %q: exact=%d event=%d sequel=%d rerelease=%d", query, got, fandangoMovieScore(query, movies[1]), fandangoMovieScore(query, movies[2]), fandangoMovieScore(query, movies[3]))
+		}
+	}
+	if got, event := fandangoTitleScore("Dune: Part Two", movies[0].Name), fandangoTitleScore("Dune: Part Two", movies[1].Name); got <= event {
+		t.Fatalf("exact title did not beat event variant: exact=%d event=%d", got, event)
+	}
+}
+
+func TestFandangoDiscoverUsesSuppliedMovieID(t *testing.T) {
+	var autocompleteReads atomic.Int32
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/napi/home/autocompleteDesktopSearch":
+			autocompleteReads.Add(1)
+			http.Error(w, "unexpected title resolution", http.StatusInternalServerError)
+		case "/napi/theaterShowtimeGroupings/123456/2026-10-03":
+			writeFandangoGrouping(t, w, "501", "hash-one", "2026-10-03T23:30:00Z")
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	provider, err := NewFandangoLocal(FandangoLocalConfig{BaseURL: server.URL, MinimumDelay: time.Millisecond}, server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	showtimes, err := provider.Discover(context.Background(), domain.QueryRequest{
+		MovieQuery: "Dune: Part Two", MovieID: "123456",
+		Location: domain.LocationConstraint{Latitude: 35.2271, Longitude: -80.8431, RadiusMiles: 25},
+		Dates:    domain.DateConstraint{Start: "2026-10-03", End: "2026-10-03"},
+		Time:     domain.TimeConstraint{Timezone: "America/New_York"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if autocompleteReads.Load() != 0 || len(showtimes) != 1 {
+		t.Fatalf("supplied movie id was re-resolved or discovery failed: autocomplete=%d showtimes=%#v", autocompleteReads.Load(), showtimes)
+	}
+}
+func TestFandangoDiscoveryCacheOverlaysCurrentMovieTitle(t *testing.T) {
+	provider, err := NewFandangoLocal(FandangoLocalConfig{BaseURL: defaultFandangoBaseURL}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	query := domain.QueryRequest{Location: domain.LocationConstraint{Query: "10001"}, Time: domain.TimeConstraint{Timezone: "America/New_York"}}
+	locationKey, _ := fandangoLocationParameters(query.Location)
+	key := strings.Join([]string{"123", "2026-10-03", locationKey, query.Time.Timezone}, "|")
+	provider.discoveryCache[key] = cachedFandangoShowtimes{
+		showtimes: []domain.Showtime{{ID: "show", MovieTitle: "Prefetch spelling"}},
+		expiresAt: time.Now().Add(time.Minute),
+	}
+	items, err := provider.discoverDate(context.Background(), fandangoMovie{ID: "123", Name: "Current title"}, "2026-10-03", query)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 || items[0].MovieTitle != "Current title" {
+		t.Fatalf("cache leaked the earlier caller's title: %#v", items)
+	}
+}
+
+func TestFandango429RetryAfterDelaysNextStart(t *testing.T) {
+	var starts atomic.Int32
+	var secondStart time.Time
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if starts.Add(1) == 1 {
+			w.Header().Set("Retry-After", "1")
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+		secondStart = time.Now()
+		_, _ = io.WriteString(w, `{"resultsByType":{}}`)
+	}))
+	defer server.Close()
+	provider, err := NewFandangoLocal(FandangoLocalConfig{BaseURL: server.URL, MinimumDelay: time.Millisecond}, server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	var response fandangoAutocompleteResponse
+	if err := provider.getJSON(context.Background(), "/napi/home/autocompleteDesktopSearch", nil, &response); err != nil {
+		t.Fatal(err)
+	}
+	if starts.Load() != 2 || secondStart.Sub(start) < 950*time.Millisecond {
+		t.Fatalf("Retry-After was not observed: starts=%d elapsed=%s", starts.Load(), secondStart.Sub(start))
+	}
+}
+func TestFandangoGateCoversBodyRead(t *testing.T) {
+	const limit = 2
+	started := make(chan struct{}, limit+1)
+	release := make(chan struct{}, limit+1)
+	var active atomic.Int32
+	var maximum atomic.Int32
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		current := active.Add(1)
+		for old := maximum.Load(); current > old && !maximum.CompareAndSwap(old, current); old = maximum.Load() {
+		}
+		defer active.Add(-1)
+		w.WriteHeader(http.StatusOK)
+		w.(http.Flusher).Flush()
+		started <- struct{}{}
+		<-release
+		_, _ = io.WriteString(w, `{"resultsByType":{}}`)
+	}))
+	defer server.Close()
+	provider, err := NewFandangoLocal(FandangoLocalConfig{BaseURL: server.URL, MinimumDelay: time.Millisecond, MaxConcurrency: limit}, server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	errs := make(chan error, limit+1)
+	for range limit + 1 {
+		go func() {
+			var response fandangoAutocompleteResponse
+			errs <- provider.getJSON(context.Background(), "/napi/home/autocompleteDesktopSearch", nil, &response)
+		}()
+	}
+	for range limit {
+		select {
+		case <-started:
+		case <-time.After(time.Second):
+			t.Fatal("request did not reach the streaming handler")
+		}
+	}
+	select {
+	case <-started:
+		t.Fatal("request beyond MaxConcurrency started before a body completed")
+	case <-time.After(200 * time.Millisecond):
+	}
+	release <- struct{}{}
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("waiting request did not start after a body completed")
+	}
+	for range limit + 1 {
+		release <- struct{}{}
+	}
+	for range limit + 1 {
+		if err := <-errs; err != nil {
+			t.Fatal(err)
+		}
+	}
+	if maximum.Load() > limit {
+		t.Fatalf("active response bodies exceeded limit: %d", maximum.Load())
+	}
+}
+
+func TestFandangoLastCancelledInventoryWaiterCancelsUpstream(t *testing.T) {
+	upstreamStarted := make(chan struct{})
+	upstreamCancelled := make(chan struct{})
+	server := httptest.NewTLSServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		close(upstreamStarted)
+		<-r.Context().Done()
+		close(upstreamCancelled)
+	}))
+	defer server.Close()
+	provider, err := NewFandangoLocal(FandangoLocalConfig{BaseURL: server.URL, RequestTimeout: time.Minute, MinimumDelay: time.Millisecond}, server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, err := provider.GetAvailability(ctx, domain.Showtime{ID: "show", SeatLayoutID: "hash", InventoryProvider: fandangoProviderName}, false)
+		done <- err
+	}()
+	select {
+	case <-upstreamStarted:
+	case <-time.After(time.Second):
+		t.Fatal("upstream read did not start")
+	}
+	cancel()
+	select {
+	case <-upstreamCancelled:
+	case <-time.After(time.Second):
+		t.Fatal("last waiter cancellation did not cancel the upstream request")
+	}
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatalf("waiter returned %v, want context cancellation", err)
+	}
+}
+func TestFandangoCancelledInventoryWaiterDoesNotPoisonJoiner(t *testing.T) {
+	upstreamStarted := make(chan struct{})
+	releaseBody := make(chan struct{}, 1)
+	defer func() {
+		select {
+		case releaseBody <- struct{}{}:
+		default:
+		}
+	}()
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		close(upstreamStarted)
+		<-releaseBody
+		_, _ = io.WriteString(w, `{"totalWidth":10,"totalHeight":10,"seats":[{"id":"A1","row":1,"column":1,"x":0,"y":0,"width":1,"height":1,"type":"standard","status":"A"}]}`)
+	}))
+	defer server.Close()
+	provider, err := NewFandangoLocal(FandangoLocalConfig{BaseURL: server.URL, RequestTimeout: time.Second, MinimumDelay: time.Millisecond}, server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	showtime := domain.Showtime{ID: "show", SeatLayoutID: "joined", InventoryProvider: fandangoProviderName}
+	firstCtx, cancelFirst := context.WithCancel(context.Background())
+	firstDone := make(chan error, 1)
+	go func() {
+		_, err := provider.GetAvailability(firstCtx, showtime, false)
+		firstDone <- err
+	}()
+	select {
+	case <-upstreamStarted:
+	case <-time.After(time.Second):
+		t.Fatal("upstream read did not start")
+	}
+	secondDone := make(chan error, 1)
+	go func() {
+		_, err := provider.GetAvailability(context.Background(), showtime, false)
+		secondDone <- err
+	}()
+	joined := false
+	timeout := time.NewTimer(time.Second)
+	defer timeout.Stop()
+	for !joined {
+		provider.flightMu.Lock()
+		for _, read := range provider.inventoryReads {
+			joined = read.waiters == 2
+		}
+		provider.flightMu.Unlock()
+		if joined {
+			break
+		}
+		select {
+		case <-timeout.C:
+			t.Fatal("second caller did not join the shared inventory read")
+		default:
+			runtime.Gosched()
+		}
+	}
+	cancelFirst()
+	if err := <-firstDone; !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled waiter returned %v", err)
+	}
+	releaseBody <- struct{}{}
+	if err := <-secondDone; err != nil {
+		t.Fatalf("remaining waiter was poisoned by cancellation: %v", err)
+	}
+}
+func TestFandangoFinalInventoryReadBypassesInFlightRead(t *testing.T) {
+	var reads atomic.Int32
+	firstStarted := make(chan struct{})
+	releaseFirst := make(chan struct{}, 1)
+	defer func() {
+		select {
+		case releaseFirst <- struct{}{}:
+		default:
+		}
+	}()
+	body := `{"totalWidth":10,"totalHeight":10,"seats":[{"id":"A1","row":1,"column":1,"x":0,"y":0,"width":1,"height":1,"type":"standard","status":"A"}]}`
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if reads.Add(1) == 1 {
+			close(firstStarted)
+			<-releaseFirst
+		}
+		_, _ = io.WriteString(w, body)
+	}))
+	defer server.Close()
+	provider, err := NewFandangoLocal(FandangoLocalConfig{BaseURL: server.URL, RequestTimeout: time.Second, MinimumDelay: time.Millisecond}, server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	showtime := domain.Showtime{ID: "show", SeatLayoutID: "final-bypass", InventoryProvider: fandangoProviderName}
+	firstDone := make(chan error, 1)
+	go func() {
+		_, err := provider.GetAvailability(context.Background(), showtime, false)
+		firstDone <- err
+	}()
+	select {
+	case <-firstStarted:
+	case <-time.After(time.Second):
+		t.Fatal("non-final read did not start")
+	}
+	if _, err := provider.GetAvailability(context.Background(), showtime, true); err != nil {
+		t.Fatalf("final read waited for or reused the non-final flight: %v", err)
+	}
+	if reads.Load() != 2 {
+		t.Fatalf("final read did not make an independent upstream request: %d", reads.Load())
+	}
+	releaseFirst <- struct{}{}
+	if err := <-firstDone; err != nil {
+		t.Fatal(err)
+	}
+}
+func TestFandangoCooldownPastCallerDeadlineFailsFast(t *testing.T) {
+	provider, err := NewFandangoLocal(FandangoLocalConfig{BaseURL: defaultFandangoBaseURL, MinimumDelay: time.Millisecond}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider.setCooldown("10", 0)
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	var response fandangoAutocompleteResponse
+	err = provider.getJSON(ctx, "/napi/home/autocompleteDesktopSearch", nil, &response)
+	if err == nil || !strings.Contains(err.Error(), "rate limit") {
+		t.Fatalf("expected fast provider rate-limit error, got %v", err)
+	}
+}
+func TestFandangoPrefetchAdmissionAndTwoReadLimit(t *testing.T) {
+	started := make(chan struct{}, 4)
+	release := make(chan struct{}, 4)
+	var reads atomic.Int32
+	var active atomic.Int32
+	var maximum atomic.Int32
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		reads.Add(1)
+		current := active.Add(1)
+		for old := maximum.Load(); current > old && !maximum.CompareAndSwap(old, current); old = maximum.Load() {
+		}
+		started <- struct{}{}
+		<-release
+		active.Add(-1)
+		_ = json.NewEncoder(w).Encode(map[string]any{"theaterShowtimes": map[string]any{"theaters": []any{}}})
+	}))
+	defer server.Close()
+	provider, err := NewFandangoLocal(FandangoLocalConfig{BaseURL: server.URL, RequestTimeout: time.Second, MinimumDelay: time.Millisecond}, server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	query := domain.QueryRequest{
+		MovieQuery: "Film", MovieID: "123",
+		Location: domain.LocationConstraint{Query: "10001"},
+		Dates:    domain.DateConstraint{Start: "2026-10-01", End: "2026-10-04"},
+		Time:     domain.TimeConstraint{Timezone: "America/New_York"},
+	}
+	firstDone := make(chan error, 1)
+	go func() { firstDone <- provider.PrefetchDiscovery(context.Background(), query) }()
+	for range 2 {
+		select {
+		case <-started:
+		case <-time.After(time.Second):
+			t.Fatal("prefetch did not start two discovery requests")
+		}
+	}
+	secondDone := make(chan error, 1)
+	go func() { secondDone <- provider.PrefetchDiscovery(context.Background(), query) }()
+	select {
+	case err := <-secondDone:
+		if err != nil {
+			t.Fatalf("rejected concurrent prefetch returned error: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("second prefetch queued instead of returning immediately")
+	}
+	select {
+	case <-started:
+		t.Fatal("prefetch exceeded its two-request concurrency limit")
+	case <-time.After(200 * time.Millisecond):
+	}
+	for range 2 {
+		release <- struct{}{}
+	}
+	for range 2 {
+		select {
+		case <-started:
+		case <-time.After(time.Second):
+			t.Fatal("prefetch did not cover the remaining requested dates")
+		}
+	}
+	for range 2 {
+		release <- struct{}{}
+	}
+	if err := <-firstDone; err != nil {
+		t.Fatal(err)
+	}
+	if reads.Load() != 4 || maximum.Load() > 2 {
+		t.Fatalf("prefetch reads=%d max concurrent=%d; want all four dates and at most two active", reads.Load(), maximum.Load())
+	}
+}
+func TestForegroundDiscoveryProgressesDuringPrefetch(t *testing.T) {
+	blockedStarted := make(chan struct{}, 2)
+	foregroundDates := make(chan struct{}, 2)
+	releaseBlocked := make(chan struct{}, 2)
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "2026-10-01") || strings.HasSuffix(r.URL.Path, "2026-10-02") {
+			blockedStarted <- struct{}{}
+			<-releaseBlocked
+		} else {
+			foregroundDates <- struct{}{}
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"theaterShowtimes": map[string]any{"theaters": []any{}}})
+	}))
+	defer server.Close()
+	provider, err := NewFandangoLocal(FandangoLocalConfig{BaseURL: server.URL, RequestTimeout: 2 * time.Second, MinimumDelay: time.Millisecond}, server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	query := domain.QueryRequest{
+		MovieQuery: "Film", MovieID: "321",
+		Location: domain.LocationConstraint{Query: "10001"},
+		Dates:    domain.DateConstraint{Start: "2026-10-01", End: "2026-10-04"},
+		Time:     domain.TimeConstraint{Timezone: "America/New_York"},
+	}
+	prefetchDone := make(chan error, 1)
+	go func() { prefetchDone <- provider.PrefetchDiscovery(context.Background(), query) }()
+	for range 2 {
+		select {
+		case <-blockedStarted:
+		case <-time.After(time.Second):
+			t.Fatal("prefetch did not occupy both speculative workers")
+		}
+	}
+	foregroundDone := make(chan error, 1)
+	go func() {
+		_, err := provider.Discover(context.Background(), query)
+		foregroundDone <- err
+	}()
+	for range 2 {
+		select {
+		case <-foregroundDates:
+		case <-time.After(time.Second):
+			t.Fatal("foreground discovery waited behind speculative worker cap")
+		}
+	}
+	select {
+	case err := <-foregroundDone:
+		t.Fatalf("foreground completed despite its two joined date flights being blocked: %v", err)
+	default:
+	}
+	for range 2 {
+		releaseBlocked <- struct{}{}
+	}
+	if err := <-foregroundDone; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-prefetchDone; err != nil {
+		t.Fatal(err)
 	}
 }
