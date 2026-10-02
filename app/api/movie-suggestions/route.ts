@@ -11,11 +11,12 @@ export async function GET(request: Request) {
       cache: "no-store",
       signal: AbortSignal.timeout(5_000),
     });
-    return new Response(await upstream.arrayBuffer(), {
+    // A 304 revalidation has no body; provider failures must not be cached by the browser.
+    return new Response(upstream.status === 304 ? null : await upstream.arrayBuffer(), {
       status: upstream.status,
       headers: {
         "Content-Type": upstream.headers.get("Content-Type") ?? "application/json",
-        "Cache-Control": "private, max-age=60",
+        "Cache-Control": upstream.ok || upstream.status === 304 ? "private, max-age=60" : "no-store",
         ...(upstream.headers.get("ETag") ? { ETag: upstream.headers.get("ETag") as string } : {}),
       },
     });

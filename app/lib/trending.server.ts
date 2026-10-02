@@ -47,8 +47,8 @@ async function loadTrending(): Promise<TrendingPayload> {
       Accept: "application/json",
       "User-Agent": "CenterSeat/0.1 personal read-only movie discovery",
     },
-    cache: "force-cache",
-    next: { revalidate: freshForMs / 1_000 },
+    // The module cache below is the only cache owner; framework fetch caching would hide its age.
+    cache: "no-store",
     signal: AbortSignal.timeout(upstreamTimeoutMs),
   });
   if (!upstream.ok) throw new Error(`Rotten Tomatoes returned HTTP ${upstream.status}`);
@@ -77,21 +77,28 @@ async function loadTrending(): Promise<TrendingPayload> {
   };
 }
 
-export async function getTrendingMovies(): Promise<TrendingPayload> {
-  const now = Date.now();
-  if (cachedPayload && now - cachedAt < freshForMs) return cachedPayload;
-  if (pendingPayload) return pendingPayload;
-
-  pendingPayload = loadTrending()
+function refreshTrending(): Promise<TrendingPayload> {
+  pendingPayload ??= loadTrending()
     .then((payload) => {
       cachedPayload = payload;
       cachedAt = Date.now();
       return payload;
     })
-    .catch(() => cachedPayload && now - cachedAt < staleForMs ? cachedPayload : unavailablePayload())
+    .catch(() => cachedPayload && Date.now() - cachedAt < staleForMs ? cachedPayload : unavailablePayload())
     .finally(() => {
       pendingPayload = undefined;
     });
-
   return pendingPayload;
+}
+
+// Stale-while-revalidate: a page render never waits on Rotten Tomatoes while a payload under a
+// day old is cached; the refresh runs in the background.
+export async function getTrendingMovies(): Promise<TrendingPayload> {
+  const age = Date.now() - cachedAt;
+  if (cachedPayload && age < freshForMs) return cachedPayload;
+  if (cachedPayload && age < staleForMs) {
+    void refreshTrending();
+    return cachedPayload;
+  }
+  return refreshTrending();
 }

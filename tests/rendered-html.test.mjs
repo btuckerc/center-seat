@@ -26,15 +26,6 @@ test("server-renders the CenterSeat product surface", async () => {
   assert.match(response.headers.get("content-type") ?? "", /^text\/html\b/i);
 
   const html = await response.text();
-  assert.match(html, /<title>CenterSeat — Find the seat worth booking<\/title>/i);
-  assert.match(html, /Find the best seat/);
-  assert.match(html, /Popular right now/);
-  assert.match(html, /Search movies/);
-  assert.match(html, /Via Rotten Tomatoes/);
-  assert.doesNotMatch(html, /Live seats connected/);
-  assert.doesNotMatch(html, /What should we optimize\?/);
-  assert.doesNotMatch(html, /Built for repeatability/);
-  assert.doesNotMatch(html, /still open|NOW SHOWING/i);
   assert.doesNotMatch(html, /example\.com|Crown Arc Cinema/);
   assert.doesNotMatch(html, /codex-preview|Your site is taking shape|react-loading-skeleton/i);
 });

@@ -72,6 +72,22 @@ export type Showtime = {
   venue_timezone?: string;
 };
 
+/**
+ * Price estimate for one recommendation's exact seat block. Never a final
+ * checkout total: taxes and checkout-only fees may differ.
+ * `null` means unknown; `0` means known to be zero. Unknown fees are never 0.
+ */
+export type PriceEstimate = {
+  ticket_count: number;
+  currency: string | null;
+  ticket_price: number | null;
+  fee_per_ticket: number | null;
+  estimated_total: number | null;
+  fees_included: boolean;
+  is_estimate: true;
+  qualification: string;
+};
+
 export type Recommendation = {
   rank: number;
   showtime: Showtime;
@@ -83,6 +99,7 @@ export type Recommendation = {
   score_breakdown: Record<string, number>;
   profile_match: "preferred_zone" | "closest_fallback";
   verified_at: string;
+  price: PriceEstimate;
   booking_url?: string;
   seat_map?: {
     seats: Seat[];
@@ -95,11 +112,19 @@ export type Recommendation = {
   };
 };
 
+export type ResolvedLocation = {
+  label: string;
+  latitude: number;
+  longitude: number;
+};
+
 export type SeatQueryResponse = {
   query_id: string;
   status: "complete" | "partial" | "no_match";
   generated_at: string;
   expires_at: string;
+  /** Present when a free-text location was resolved by the backend. */
+  resolved_location?: ResolvedLocation;
   /** Ranks can be refreshed until this instant; afterwards the search must be re-run. */
   refresh_until: string;
   coverage: {
@@ -132,6 +157,7 @@ export type ShowtimeQueryResponse = {
   status: "complete" | "no_match";
   generated_at: string;
   expires_at: string;
+  resolved_location?: ResolvedLocation;
   coverage: SeatQueryResponse["coverage"];
   showtimes: Showtime[];
   warnings?: string[];
@@ -144,7 +170,7 @@ export type ProviderStatus = {
   configured: boolean;
   message?: string;
   coverage?: string;
-  location_mode?: "coordinates" | "postal_or_coordinates";
+  location_mode?: "coordinates" | "postal_or_coordinates" | "text_or_coordinates";
   last_success_at?: string;
 };
 
@@ -300,6 +326,7 @@ export type CheckoutHandoff = {
   seats: string[];
   booking_url?: string;
   verified_at: string;
+  price: PriceEstimate;
   share_url?: string;
   instructions: string;
 };
@@ -324,8 +351,9 @@ export function buildCheckoutHandoff(recommendation: Recommendation, ticketCount
     seats,
     ...(bookingURL ? { booking_url: bookingURL } : {}),
     verified_at: recommendation.verified_at,
+    price: recommendation.price,
     ...(shareURL ? { share_url: shareURL } : {}),
-    instructions: `Open the provider checkout for ${recommendation.showtime.venue_name} at ${labels.date} ${labels.time} ${labels.zone}, choose ${ticketCount} ticket${ticketCount === 1 ? "" : "s"}, select seats ${seats.join(", ")}, and stop before any payment is submitted. If any seat is no longer available, do not substitute; re-run the CenterSeat search.`,
+    instructions: `Open the provider checkout for ${recommendation.showtime.venue_name} at ${labels.date} ${labels.time} ${labels.zone}, choose ${ticketCount} ticket${ticketCount === 1 ? "" : "s"}, select seats ${seats.join(", ")}, and stop before any payment is submitted. Price ${recommendation.price.estimated_total === null ? "is unknown" : `is an estimate, not final (${recommendation.price.estimated_total} ${recommendation.price.currency ?? ""})`}. If any seat is no longer available, do not substitute; re-run the CenterSeat search.`,
   };
 }
 

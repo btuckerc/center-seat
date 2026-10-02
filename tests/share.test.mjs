@@ -58,6 +58,16 @@ test("a page without a shared search is not treated as one", () => {
   assert.equal(queryFromSearchParams(new URLSearchParams("utm_source=x")), null);
 });
 
+test("run is opt-in and malformed or unknown link parameters are reported", () => {
+  const state = { ...createDefaultQuery("Europe/Berlin"), movie: "Heat", movieId: "canonical-7" };
+  assert.equal(queryFromSearchParams(searchParamsFromQuery(state)).run, false);
+  assert.equal(queryFromSearchParams(searchParamsFromQuery(state, { run: true })).run, true);
+  const parsed = queryFromSearchParams(new URLSearchParams("movie=Heat&run=yes&surprise=1"));
+  assert.equal(parsed.run, false);
+  assert.ok(parsed.errors.some((error) => error.startsWith("run ")));
+  assert.ok(parsed.errors.some((error) => error.includes("surprise")));
+});
+
 test("default dates follow the selected timezone, not the machine's", () => {
   const instant = new Date("2026-10-02T05:30:00Z");
   assert.equal(dateInTimeZone("America/New_York", 0, instant), "2026-10-02");

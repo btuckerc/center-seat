@@ -7,6 +7,7 @@ import { isValidTimeZone, type QueryState, type SeatProfile, type TimeMode } fro
  *
  * v=1 movie movie_id near lat lon tz from to tickets profile zone time start end
  * formats dist price captions ad wc comp skip recl split run
+ * Unknown keys and malformed values are returned as errors for the UI.
  */
 export const shareVersion = "1";
 
@@ -15,6 +16,7 @@ const seatProfiles: SeatProfile[] = ["balanced", "dead_center", "two_thirds_back
 const captionModes = ["any", "open", "closed", "none"];
 const datePattern = /^\d{4}-\d{2}-\d{2}$/;
 const clockPattern = /^([01]\d|2[0-3]):[0-5]\d$/;
+const shareFields: Record<string, true> = { v: true, movie: true, movie_id: true, near: true, lat: true, lon: true, tz: true, from: true, to: true, tickets: true, profile: true, zone: true, time: true, start: true, end: true, formats: true, dist: true, price: true, captions: true, ad: true, wc: true, comp: true, skip: true, recl: true, split: true, run: true };
 
 export function searchParamsFromQuery(state: QueryState, options: { run?: boolean } = {}): URLSearchParams {
   const params = new URLSearchParams({ v: shareVersion, movie: state.movie.trim() });
@@ -66,11 +68,14 @@ export type ParsedShare = {
 
 /** Returns null when the URL carries no shared search. */
 export function queryFromSearchParams(params: URLSearchParams): ParsedShare | null {
-  if (!params.has("v") && !params.has("movie")) return null;
+  if (!params.has("v") && !params.has("movie") && ![...params.keys()].some((name) => shareFields[name])) return null;
   const query: Partial<QueryState> = {};
   const errors: string[] = [];
   const version = params.get("v");
   if (version !== null && version !== shareVersion) errors.push(`Unsupported link version ${version}`);
+  for (const name of params.keys()) {
+    if (!shareFields[name]) errors.push(`Unknown shared-link parameter ${name}`);
+  }
 
   const integer = (name: string, minimum: number, maximum: number, apply: (value: number) => void) => {
     const raw = params.get(name);
@@ -86,10 +91,13 @@ export function queryFromSearchParams(params: URLSearchParams): ParsedShare | nu
     else errors.push(`${name} must be 1 or 0`);
   };
 
+  const movieIDRaw = params.get("movie_id");
+  if (movieIDRaw !== null) {
+    if (movieIDRaw.trim()) query.movieId = movieIDRaw.trim().slice(0, 128);
+    else errors.push("movie_id must not be empty");
+  }
   const movie = params.get("movie")?.trim();
   if (movie) query.movie = movie.slice(0, 160);
-  const movieID = params.get("movie_id")?.trim();
-  if (movieID) query.movieId = movieID.slice(0, 128);
   const near = params.get("near");
   if (near !== null) query.location = near.trim().slice(0, 160);
 
@@ -174,5 +182,7 @@ export function queryFromSearchParams(params: URLSearchParams): ParsedShare | nu
   flag("recl", (value) => { query.recliners = value; });
   flag("split", (value) => { query.allowSplit = value; });
 
-  return { query, errors, run: params.get("run") === "1" };
+  const run = params.get("run");
+  if (run !== null && run !== "1" && run !== "0") errors.push("run must be 1 or 0");
+  return { query, errors, run: run === "1" };
 }

@@ -50,10 +50,10 @@ const apiFetch = async (path: string, signal?: AbortSignal) => {
   });
 };
 
-export async function openCinemaProviderStatuses(): Promise<ProviderStatus[]> {
+export async function openCinemaProviderStatuses(timeoutMs = 5_000): Promise<ProviderStatus[]> {
   if (!configuration()) return [];
   try {
-    const response = await apiFetch("/api/v1/public/status", AbortSignal.timeout(5_000));
+    const response = await apiFetch("/api/v1/public/status", AbortSignal.timeout(timeoutMs));
     if (!response.ok) throw new Error("Open Cinema health check failed");
     return [
       {
