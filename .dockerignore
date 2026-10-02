@@ -1,6 +1,7 @@
 .git
 .next
 .wrangler
+.vinext
 coverage
 dist
 node_modules
