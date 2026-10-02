@@ -34,7 +34,8 @@ export const ClockIcon = (props: IconProps) => <Svg {...props}><circle cx="12" c
 export const FilmIcon = (props: IconProps) => <Svg {...props}><rect height="16" rx="2" width="18" x="3" y="4" /><path d="M7 4v16M17 4v16M3 9h4M3 15h4M17 9h4M17 15h4" /></Svg>;
 export const PencilIcon = (props: IconProps) => <Svg {...props}><path d="M4 20h4L19 9l-4-4L4 16Z" /><path d="m13.5 6.5 4 4" /></Svg>;
 export const AlertIcon = (props: IconProps) => <Svg {...props}><path d="M12 4 2.8 19.5h18.4Z" /><path d="M12 10v4.5" /><circle cx="12" cy="17" r=".9" fill="currentColor" stroke="none" /></Svg>;
-export const SeatIcon = (props: IconProps) => <Svg {...props}><path d="M6.5 12V7.5A2.5 2.5 0 0 1 9 5h6a2.5 2.5 0 0 1 2.5 2.5V12" /><path d="M4.5 11.5h15v4a1.5 1.5 0 0 1-1.5 1.5H6a1.5 1.5 0 0 1-1.5-1.5Z" /><path d="M7 17v2.5M17 17v2.5" /></Svg>;
+/** Cinema seat, front view: a back taller than it is wide between two armrests, so it never reads as a vehicle. */
+export const SeatIcon = (props: IconProps) => <Svg {...props}><rect height="12" rx="3" width="10" x="7" y="2.5" /><path d="M4 20v-8.5a1.5 1.5 0 0 1 3 0V16h10v-4.5a1.5 1.5 0 0 1 3 0V20" /></Svg>;
 export const WheelchairIcon = (props: IconProps) => <Svg {...props}><circle cx="11" cy="4.5" r="1.6" /><path d="M11 7.5v6h5l2 5" /><path d="M11 10.5h4.5" /><path d="M8 11.2a5 5 0 1 0 7 6.3" /></Svg>;
 
 /** Critics mark: a simple tomato. */
