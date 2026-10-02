@@ -4,7 +4,7 @@ CenterSeat finds movie showtimes and compares available theater seats. It return
 
 ## Explicit search context
 
-Every agent search must specify an IANA `timezone` and an explicit `location` (`zip` or `query`, or both `latitude` and `longitude`). Links preserve both so the recipient's browser location/timezone is never substituted. Share URLs use query parameters including `movie`, `near`, and `tz`; for example: `https://movies.angl.gg/?v=1&movie=Dune&near=10001&tz=America%2FNew_York&from=2026-10-02&to=2026-10-08&tickets=2`.
+Every agent search must specify an IANA `timezone` and an explicit `location` (`zip` or free-text `query`, or both `latitude` and `longitude`). Queries accept ZIP codes, cities, neighborhoods, and street addresses. Prefer a ZIP when a city name is ambiguous, and check `resolved_location` in the search result to confirm which place was matched. Links preserve both so the recipient's browser location/timezone is never substituted. Share URLs use query parameters including `movie`, `near`, and `tz`; for example: `https://movies.angl.gg/?v=1&movie=Dune&near=10001&tz=America%2FNew_York&from=2026-10-02&to=2026-10-08&tickets=2`.
 
 ## Agent API
 
@@ -18,8 +18,12 @@ All `/api/agent/*` requests require `Authorization: Bearer <your configured toke
 
 ## Freshness and handoff
 
-Search responses describe a snapshot that expires in about 8 seconds. Refresh a rank before acting; ranks can be refreshed until `refresh_until`, after which rerun the search. Handoff contains the exact verified seats, ticket count, venue, timezone-labelled start, and provider checkout URL when available. Select those exact seats only, never substitute seats, and stop before payment. CenterSeat does not reserve seats or make purchases.
+Search responses describe a snapshot that expires in about 8 seconds. Refresh a rank before acting; ranks can be refreshed until `refresh_until`, after which rerun the search. `verified_at` is the time of the live inventory read. Handoff contains the exact verified seats, ticket count, venue, timezone-labelled start, provider checkout URL when available, and a price estimate. Select those exact seats only, never substitute seats, and stop before payment. CenterSeat does not reserve seats or make purchases.
+
+## Price
+
+Each recommendation has a `price` estimate: `ticket_count`, `currency`, `ticket_price` (per ticket), `fee_per_ticket`, `estimated_total`, `fees_included`, and a `qualification`. `null` means unknown. `fee_per_ticket: null` means fees are unknown and not included; `0` means known to have no fee. Present it as an estimate, never as the final checkout total.
 
 ## Errors
 
-Errors are RFC 9457 problem JSON with a stable `code`. `query_expired` (410): rerun the search. `seats_unavailable`, `screening_started`, `price_exceeded` (409): that rank is no longer valid; try another rank or rerun. `provider_unavailable` (503): retry later. `invalid_request` (400) / `validation_failed` (422): fix the request.
+Errors are RFC 9457 problem JSON with a stable `code`. `unauthorized` (401): missing or wrong token. `query_expired` (410): rerun the search. `seats_unavailable`, `screening_started`, `price_exceeded` (409): that rank is no longer valid; try another rank or rerun. `provider_unavailable` (503): retry later. `invalid_request` (400) / `validation_failed` (422, including a location that cannot be found): fix the request. Full reference: https://github.com/btuckerc/center-seat/blob/main/docs/agents.md

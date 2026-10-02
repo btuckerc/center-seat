@@ -12,7 +12,7 @@ const server = createServer(async (req, res) => {
   if (req.url === '/v1/providers') return res.end(JSON.stringify({ providers: [{ kind: 'inventory', configured: true }] }));
   if (req.url === '/v1/seat-queries' && req.method === 'POST') {
     backendState.query = body;
-    return res.end(JSON.stringify({ query_id: 'q-1', status: 'complete', expires_at: '2026-10-01T00:00:08Z', refresh_until: '2026-10-01T00:15:00Z', coverage: { range_best_proven: true, winner_verified: true, inventories_fresh: 1, inventories_failed: 0, dates_compared: 2, dates_with_screenings: 2 }, winner: { rank: 1, showtime: { movie_title: 'Dune', venue_name: 'Cinema', auditorium_name: 'Room 1', starts_at: '2026-10-03T01:00:00Z', format: 'IMAX' }, seats: [{ label: 'G7' }, { label: 'G8' }], score: 92, profile_match: 'preferred_zone', verified_at: '2026-10-01T00:00:00Z', booking_url: 'https://tickets.test' }, alternatives: [], warnings: [] }));
+    return res.end(JSON.stringify({ query_id: 'q-1', status: 'complete', expires_at: '2026-10-01T00:00:08Z', refresh_until: '2026-10-01T00:15:00Z', coverage: { range_best_proven: true, winner_verified: true, inventories_fresh: 1, inventories_failed: 0, dates_compared: 2, dates_with_screenings: 2 }, winner: { rank: 1, showtime: { movie_title: 'Dune', venue_name: 'Cinema', auditorium_name: 'Room 1', starts_at: '2026-10-03T01:00:00Z', format: 'IMAX' }, seats: [{ label: 'G7' }, { label: 'G8' }], score: 92, profile_match: 'preferred_zone', verified_at: '2026-10-01T00:00:00Z', price: { ticket_count: 2, currency: 'USD', ticket_price: 15, fee_per_ticket: null, estimated_total: 30, fees_included: false, is_estimate: true, qualification: 'Fees unknown.' }, booking_url: 'https://tickets.test' }, alternatives: [], warnings: [] }));
   }
   if (req.url?.startsWith('/v1/seat-queries/q-expired/recommendations/')) {
     res.statusCode = 410;
@@ -44,15 +44,21 @@ test('search validates explicit timezone/location and returns share URL and chec
     assert.equal(response.status, 400);
     assert.match((await response.json()).detail, /timezone|location/);
   }
-  const response = await search(jsonRequest('http://centerseat.test/api/agent/search', { movie: 'Dune', location: { zip: '10001' }, timezone: 'America/New_York' }));
+  const response = await search(jsonRequest('http://centerseat.test/api/agent/search', { movie: 'Dune', movie_id: '123456', location: { zip: '10001' }, timezone: 'America/New_York' }));
   assert.equal(response.status, 200);
   const result = await response.json();
   assert.equal(backendState.query.time.timezone, 'America/New_York');
+  assert.equal(backendState.query.movie_id, '123456');
+  assert.equal(result.movie_id, '123456');
+  assert.match(result.share_url, /movie_id=123456/);
   assert.deepEqual(backendState.query.location, { query: '10001', radius_miles: 25 });
   assert.match(result.share_url, /tz=America%2FNew_York/);
   assert.match(result.share_url, /near=10001/);
   assert.deepEqual(result.winner.handoff.seats, ['G7', 'G8']);
   assert.equal(result.winner.handoff.ticket_count, 2);
+  assert.equal(result.winner.price.estimated_total, 30);
+  assert.equal(result.winner.handoff.price.fees_included, false);
+  assert.match(result.winner.handoff.instructions, /estimate, not final/);
   assert.equal('seat_map' in result.winner, false);
 });
 

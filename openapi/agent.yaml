@@ -1,0 +1,180 @@
+openapi: 3.1.0
+info:
+  title: CenterSeat agent API
+  version: 1.0.0
+  description: >-
+    Read-only movie seat search for agents. Finds showtimes and the best
+    available seats; never holds, reserves or buys tickets. See docs/agents.md.
+servers:
+  - url: https://movies.angl.gg
+security:
+  - bearerAuth: []
+paths:
+  /api/agent/search:
+    post:
+      operationId: searchSeats
+      summary: Find the best available seats for a movie near a location
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SearchRequest" }
+      responses:
+        "200":
+          description: Search snapshot
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SearchResponse" }
+        default: { $ref: "#/components/responses/Problem" }
+  /api/agent/recommendation:
+    get:
+      operationId: refreshRecommendation
+      summary: Re-verify one ranked recommendation with a live inventory read before acting on it
+      parameters:
+        - { name: query_id, in: query, required: true, schema: { type: string } }
+        - { name: rank, in: query, required: true, schema: { type: integer, minimum: 1 } }
+        - { name: tz, in: query, required: true, schema: { type: string }, description: "IANA timezone for displayed local times" }
+      responses:
+        "200":
+          description: Refreshed recommendation with checkout handoff
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Recommendation" }
+        default: { $ref: "#/components/responses/Problem" }
+  /api/agent/movies:
+    get:
+      operationId: suggestMovies
+      summary: Resolve a free-text title to provider movies; pass the chosen id as movie_id
+      parameters:
+        - { name: q, in: query, required: true, schema: { type: string } }
+      responses:
+        "200":
+          description: Matching titles
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  suggestions:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id: { type: string }
+                        title: { type: string }
+                        year: { type: string }
+                        release_date: { type: string }
+        default: { $ref: "#/components/responses/Problem" }
+  /api/agent/providers:
+    get:
+      operationId: listProviders
+      summary: Provider health
+      responses:
+        "200":
+          description: Provider statuses
+          content:
+            application/json:
+              schema: { type: object }
+        default: { $ref: "#/components/responses/Problem" }
+components:
+  securitySchemes:
+    bearerAuth: { type: http, scheme: bearer }
+  responses:
+    Problem:
+      description: "RFC 9457 problem JSON. Codes: invalid_request 400, unauthorized 401, seats_unavailable/screening_started/price_exceeded 409, query_expired 410, validation_failed 422 (including a location that cannot be found), provider_unavailable 503."
+      content:
+        application/problem+json:
+          schema:
+            type: object
+            properties:
+              code: { type: string }
+              status: { type: integer }
+              detail: { type: string }
+  schemas:
+    SearchRequest:
+      type: object
+      required: [movie, timezone, location]
+      properties:
+        movie: { type: string, description: "Movie title, e.g. Primetime" }
+        movie_id: { type: string, description: "Provider id from suggestMovies; searches that exact movie" }
+        timezone: { type: string, description: "IANA timezone, e.g. America/New_York" }
+        location:
+          type: object
+          description: "zip, free-text query (city or address), or both latitude and longitude"
+          properties:
+            zip: { type: string }
+            query: { type: string, description: "City or address, e.g. Brooklyn, NY" }
+            latitude: { type: number }
+            longitude: { type: number }
+        dates:
+          type: object
+          properties:
+            start: { type: string, description: "YYYY-MM-DD" }
+            end: { type: string, description: "YYYY-MM-DD" }
+        tickets: { type: integer, minimum: 1, maximum: 8 }
+        profile: { type: string, enum: [balanced, dead_center, two_thirds_back, aisle, front, back, custom] }
+        time:
+          type: object
+          properties:
+            mode: { type: string, enum: [any, inside, outside, before, after] }
+            start: { type: string, description: "HH:MM, 24-hour" }
+            end: { type: string, description: "HH:MM, 24-hour" }
+        formats: { type: array, items: { type: string }, description: "e.g. Standard, IMAX, Dolby" }
+        max_distance_miles: { type: number, minimum: 2, maximum: 49 }
+        max_total_price: { type: number, minimum: 0 }
+        captions: { type: string, enum: [any, open, closed, none] }
+        accessibility:
+          type: object
+          properties:
+            wheelchair_spaces: { type: integer, minimum: 0, maximum: 8 }
+            companion_seats: { type: integer, minimum: 0, maximum: 8 }
+            audio_description: { type: boolean }
+        exclude_first_rows: { type: integer, minimum: 0, maximum: 20 }
+        recliners: { type: boolean }
+        allow_split_party: { type: boolean }
+    SearchResponse:
+      type: object
+      properties:
+        status: { type: string, enum: [complete, partial, no_match] }
+        query_id: { type: string }
+        movie_id: { type: [string, "null"] }
+        expires_at: { type: string, description: "Snapshot expiry (about 8 seconds)" }
+        refresh_until: { type: string, description: "Ranks can be refreshed until this time; afterwards search again" }
+        resolved_location:
+          type: object
+          description: "Present when free text was geocoded; check it is the intended place"
+          properties:
+            label: { type: string }
+            latitude: { type: number }
+            longitude: { type: number }
+        share_url: { type: string }
+        coverage: { type: object }
+        warnings: { type: array, items: { type: string } }
+        winner: { $ref: "#/components/schemas/Recommendation" }
+        alternatives: { type: array, items: { $ref: "#/components/schemas/Recommendation" } }
+        showtimes: { type: array, items: { type: object }, description: "Only when live seat inventory is unavailable" }
+    Recommendation:
+      type: object
+      properties:
+        rank: { type: integer }
+        venue: { type: string }
+        auditorium: { type: string }
+        local_start: { type: string }
+        format: { type: string }
+        seats: { type: array, items: { type: string } }
+        verified_at: { type: string, description: "Time of the live inventory read" }
+        booking_url: { type: string }
+        price: { $ref: "#/components/schemas/PriceEstimate" }
+        handoff: { type: object, description: "Exact seats, ticket count, venue, local start, booking URL and price estimate" }
+    PriceEstimate:
+      type: object
+      description: "Estimate only, never the final checkout total. null means unknown."
+      properties:
+        ticket_count: { type: integer }
+        currency: { type: [string, "null"] }
+        ticket_price: { type: [number, "null"], description: "Per ticket" }
+        fee_per_ticket: { type: [number, "null"], description: "null = unknown and not included; 0 = known no fee" }
+        estimated_total: { type: [number, "null"] }
+        fees_included: { type: boolean }
+        is_estimate: { type: boolean }
+        qualification: { type: string }

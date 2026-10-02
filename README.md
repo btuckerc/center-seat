@@ -44,8 +44,10 @@ API answers expired snapshots with `410` and a problem `code`.
 
 The URL carries the whole search, including an explicit location (`near`, or
 `lat`/`lon`) and IANA timezone (`tz`), so a recipient's browser never
-substitutes its own. Dates and times are interpreted in `tz`. Add `run=1` to
-start the search on open. **Copy link** in the results produces one.
+substitutes its own. Dates and times use `tz`. `run=1` starts a search on open
+only when generated with the explicit run option. It starts once after hydration
+and provider setup, then `run` is removed from the URL. **Share → Copy link**
+produces a non-running link.
 
 ## Agent interface
 
@@ -57,6 +59,9 @@ used in returned share links.
   `GET /api/agent/movies`, `GET /api/agent/providers`
 - MCP (Streamable HTTP, stateless): `POST /api/mcp`
 - Agent instructions: [`/llms.txt`](public/llms.txt)
+- Full reference (routes, MCP, auth scope, errors, credential handling):
+  [`docs/agents.md`](docs/agents.md); Action schema:
+  [`openapi/agent.yaml`](openapi/agent.yaml)
 
 Results include a checkout handoff: exact seats, ticket count, venue,
 timezone-labelled start, and provider URL. Agents must select exactly those

@@ -108,7 +108,7 @@ async function backend<T>(path: string, init?: RequestInit): Promise<T> {
 function originFor(origin?: string) { return process.env.CENTERSEAT_PUBLIC_URL || origin || "https://movies.angl.gg"; }
 function summarize(rec: Recommendation, tz: string) {
   const local = formatShowtime(rec.showtime.starts_at, tz);
-  return { rank: rec.rank, venue: rec.showtime.venue_name, auditorium: rec.showtime.auditorium_name, local_start: `${local.date} ${local.time} ${local.zone}`, format: rec.showtime.format, seats: rec.seats.map(s => s.label), score: rec.score, profile_match: rec.profile_match, verified_at: rec.verified_at, booking_url: rec.booking_url || rec.showtime.booking_url };
+  return { rank: rec.rank, venue: rec.showtime.venue_name, auditorium: rec.showtime.auditorium_name, local_start: `${local.date} ${local.time} ${local.zone}`, format: rec.showtime.format, seats: rec.seats.map(s => s.label), score: rec.score, profile_match: rec.profile_match, verified_at: rec.verified_at, price: rec.price, booking_url: rec.booking_url || rec.showtime.booking_url };
 }
 export async function searchSeats(input: unknown, origin?: string) {
   const state = validateSearch(input);
@@ -117,7 +117,7 @@ export async function searchSeats(input: unknown, origin?: string) {
   const path = live ? "/v1/seat-queries" : "/v1/showtime-queries";
   const data = await backend<SeatQueryResponse | ShowtimeQueryResponse>(path, { method: "POST", headers: { "Content-Type": "application/json", "Idempotency-Key": crypto.randomUUID() }, body: JSON.stringify(queryStateToRequest(state)) });
   const share_url = shareURL(originFor(origin), state);
-  const common = { status: data.status, query_id: data.query_id, expires_at: data.expires_at, share_url, coverage: { range_best_proven: data.coverage.range_best_proven, winner_verified: data.coverage.winner_verified, inventories_fresh: data.coverage.inventories_fresh, inventories_failed: data.coverage.inventories_failed, dates_compared: data.coverage.dates_compared, dates_with_screenings: data.coverage.dates_with_screenings }, warnings: data.warnings ?? [] };
+  const common = { status: data.status, query_id: data.query_id, movie_id: state.movieId ?? null, expires_at: data.expires_at, resolved_location: data.resolved_location, share_url, coverage: { range_best_proven: data.coverage.range_best_proven, winner_verified: data.coverage.winner_verified, inventories_fresh: data.coverage.inventories_fresh, inventories_failed: data.coverage.inventories_failed, dates_compared: data.coverage.dates_compared, dates_with_screenings: data.coverage.dates_with_screenings }, warnings: data.warnings ?? [] };
   if (live) {
     const seatData = data as SeatQueryResponse;
     return { ...common, refresh_until: seatData.refresh_until, winner: seatData.winner ? { ...summarize(seatData.winner, state.timezone), handoff: buildCheckoutHandoff(seatData.winner, seatData.winner.seats.length, state.timezone, share_url) } : null, alternatives: seatData.alternatives.map(r => summarize(r, state.timezone)) };

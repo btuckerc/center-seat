@@ -21,6 +21,12 @@ The override:
 
 Cloudflare Tunnel routes `movies.angl.gg` to the loopback web port.
 
+## Agent token
+
+`deploy/macmini/agent-token.sh status|rotate|print` manages
+`CENTERSEAT_AGENT_TOKEN` in `.env` without showing it; see
+[`docs/agents.md`](../../docs/agents.md#managing-the-credential).
+
 ## Verify
 
 ```sh
