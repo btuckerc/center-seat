@@ -456,7 +456,7 @@ export function SearchExperience({
         </section>
       )}
 
-      <Sheet className="query-sheet" label="Search" locked={searching} onClose={() => setQueryOpen(false)} open={queryOpen}>
+      <Sheet className="query-sheet" label="Search" locked={searching} onClose={() => setQueryOpen(false)} open={queryOpen} returnFocus=".query-chip">
         <QuerySheet
           draft={draft}
           locating={locating}

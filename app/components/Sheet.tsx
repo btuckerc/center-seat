@@ -11,13 +11,15 @@ const focusable = 'a[href],button:not([disabled]),input:not([disabled]),select:n
  * Modal surface: bottom sheet on narrow screens, centered card otherwise.
  * Traps focus, restores it to the opener, and plays an exit before unmounting.
  */
-export function Sheet({ open, onClose, locked = false, label, className = "", children }: {
+export function Sheet({ open, onClose, locked = false, label, className = "", returnFocus, children }: {
   open: boolean;
   onClose: () => void;
   /** Blocks Escape, backdrop, and close button (an in-flight search). */
   locked?: boolean;
   label: string;
   className?: string;
+  /** Selector focused on close when the opener has left the page (e.g. replaced by results). */
+  returnFocus?: string;
   children: ReactNode;
 }) {
   const [mounted, setMounted] = useState(open);
@@ -76,9 +78,10 @@ export function Sheet({ open, onClose, locked = false, label, className = "", ch
         if (item.ariaHidden === null) item.element.removeAttribute("aria-hidden");
         else item.element.setAttribute("aria-hidden", item.ariaHidden);
       }
-      if (opener.current?.isConnected) opener.current.focus({ preventScroll: true });
+      const target = opener.current?.isConnected ? opener.current : returnFocus ? document.querySelector<HTMLElement>(returnFocus) : null;
+      target?.focus({ preventScroll: true });
     };
-  }, [open]);
+  }, [open, returnFocus]);
 
   if (!mounted) return null;
 
