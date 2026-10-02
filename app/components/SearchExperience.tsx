@@ -15,7 +15,7 @@ import {
 } from "../lib/api";
 import { queryFromSearchParams, searchParamsFromQuery } from "../lib/share";
 import { InfoContent } from "./InfoSheet";
-import { AlertIcon, ChevronLeftIcon, ChevronRightIcon, FilmIcon, InfoIcon, PencilIcon, PopcornIcon, SearchIcon, SeatIcon, TomatoIcon } from "./icons";
+import { AlertIcon, BrandMark, ChevronLeftIcon, ChevronRightIcon, FilmIcon, InfoIcon, PencilIcon, PopcornIcon, SearchIcon, SeatIcon, TomatoIcon } from "./icons";
 import { locationIsReady, QuerySheet, type LocationMode, type Problem, type ProviderState } from "./QuerySheet";
 import { LiveResult, ShowtimeResults } from "./Results";
 import { Sheet } from "./Sheet";
@@ -363,7 +363,7 @@ export function SearchExperience({
     <main className={`app ${hasOutcome ? "is-result" : "is-lobby"}`}>
       <header className="topbar">
         <button aria-label="CenterSeat home" className="brand" onClick={resetHome} type="button">
-          <span aria-hidden="true" className="brand-mark"><SeatIcon size={18} /></span>
+          <BrandMark />
           <span className="brand-name">CenterSeat</span>
         </button>
         {hasOutcome && applied ? (
@@ -456,7 +456,7 @@ export function SearchExperience({
         </section>
       )}
 
-      <Sheet className="query-sheet" label="Search" locked={searching} onClose={() => setQueryOpen(false)} open={queryOpen} returnFocus=".query-chip">
+      <Sheet className="query-sheet" label="Search" locked={searching} onClose={() => setQueryOpen(false)} open={queryOpen} returnFocus=".query-chip" titled={false}>
         <QuerySheet
           draft={draft}
           locating={locating}

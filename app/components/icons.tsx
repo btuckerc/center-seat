@@ -55,3 +55,25 @@ export const PopcornIcon = (props: IconProps) => (
     <path d="M9.4 9l.5 11.5M14.6 9l-.5 11.5" stroke="#fff3e2" strokeWidth={1.4} />
   </Svg>
 );
+
+/**
+ * Brand mark: a screen over three curved rows of seats, the centre seat lit gold.
+ * 32-unit tile; 4.5-unit seats on a 6-unit pitch, outer columns raised 0.75 so rows bow toward the screen,
+ * and the block (screen apex to last row) is centred vertically.
+ */
+export const BrandMark = () => (
+  <svg aria-hidden="true" className="brand-mark" focusable="false" height="32" viewBox="0 0 32 32" width="32">
+    <path className="brand-screen" d="M9.5 7Q16 4.5 22.5 7" />
+    {[0, 1, 2].map((row) => [0, 1, 2].map((column) => (
+      <rect
+        className={row === 1 && column === 1 ? "brand-seat is-lit" : "brand-seat"}
+        height="4.5"
+        key={`${row}-${column}`}
+        rx="1.5"
+        width="4.5"
+        x={7.75 + column * 6}
+        y={10.5 + row * 6 - (column === 1 ? 0 : 0.75)}
+      />
+    )))}
+  </svg>
+);

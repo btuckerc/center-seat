@@ -13,7 +13,8 @@ import {
   type SeatProfile,
   type TimeMode,
 } from "../lib/api";
-import { AlertIcon, ArrowRightIcon, CalendarIcon, FilmIcon, LocateIcon, MinusIcon, PinIcon, PlusIcon, RefreshIcon, SearchIcon, SeatIcon, SlidersIcon, WheelchairIcon } from "./icons";
+import { AlertIcon, ArrowRightIcon, CalendarIcon, ChevronRightIcon, FilmIcon, LocateIcon, MinusIcon, PinIcon, PlusIcon, RefreshIcon, SearchIcon, SeatIcon, SlidersIcon, WheelchairIcon } from "./icons";
+import { SheetClose } from "./Sheet";
 
 export type ProviderState = "checking" | "ready" | "discovery" | "unconfigured" | "unavailable";
 export type Problem = { title: string; detail: string; status?: number };
@@ -44,7 +45,13 @@ const profiles: { value: SeatProfile; label: string; hint: string; zones: [numbe
   { value: "back", label: "Back", hint: "More distance", zones: [[.12, .72, .76, .2]] },
   { value: "custom", label: "Custom", hint: "Draw a preferred area", zones: [] },
 ];
+/** Two full weeks, laid out as a 7×2 grid whose columns start on today's weekday. */
 const stripDays = 14;
+const maxTickets = 8;
+const noon = (day: string) => new Date(`${day}T12:00:00Z`);
+const dayLabel = new Intl.DateTimeFormat("en-US", { weekday: "long", month: "long", day: "numeric", timeZone: "UTC" });
+const weekdayLetter = new Intl.DateTimeFormat("en-US", { weekday: "narrow", timeZone: "UTC" });
+const rangeLabel = new Intl.DateTimeFormat("en-US", { weekday: "short", month: "short", day: "numeric", timeZone: "UTC" });
 const postalCodePattern = /^\s*\d{5}(?:-\d{4})?\s*$/;
 const yearSuffix = /\s*\((?:19|20)\d{2}\)\s*$/;
 const defaultCustomZone: NormalizedSeatZone = { minimumX: .28, maximumX: .72, minimumY: .42, maximumY: .76 };
@@ -165,14 +172,13 @@ export function QuerySheet({
       noValidate
       onSubmit={(event) => { event.preventDefault(); submit(); }}
     >
-      {providerState === "discovery" ? <p className="notice"><FilmIcon size={16} />Showtimes only — this source has no seat maps.</p> : null}
-      {providerState === "unconfigured" || providerState === "unavailable" ? <p className="notice is-error" role="alert"><AlertIcon size={16} />Live source unavailable.</p> : null}
-
-      <div className={`movie-row${shaking === "movie" ? " shake" : ""}`}>
-        {showPoster ? (
-          // eslint-disable-next-line @next/next/no-img-element -- provider poster hosts are dynamic.
-          <img alt="" className="movie-row-poster" height="72" src={poster.url} style={{ viewTransitionName: "active-poster" }} width="48" />
-        ) : <span className="movie-row-icon"><SearchIcon size={22} /></span>}
+      <header className={`sheet-head query-head${shaking === "movie" ? " shake" : ""}`}>
+        <span aria-hidden="true" className="slot">
+          {showPoster ? (
+            // eslint-disable-next-line @next/next/no-img-element -- provider poster hosts are dynamic.
+            <img alt="" className="query-poster" height="54" src={poster.url} style={{ viewTransitionName: "active-poster" }} width="36" />
+          ) : <SearchIcon />}
+        </span>
         <MovieField
           errorID={error === "movie" ? errorID : undefined}
           enabled={providerState === "ready"}
@@ -183,138 +189,148 @@ export function QuerySheet({
           resolveToken={resolveToken}
           year={showPoster ? poster.year : undefined}
         />
-      </div>
-      {error === "movie" ? errorNode : null}
+        <SheetClose />
+      </header>
 
-      <div className={`location-row${shaking === "location" ? " shake" : ""}`}>
-        <PinIcon className="field-icon" />
-        <input
-          aria-describedby={locationProblem ? locationProblemID : error === "location" ? errorID : undefined}
-          aria-invalid={Boolean(locationProblem) || error === "location"}
-          aria-label="Location"
-          autoComplete="postal-code"
-          className={hasCoordinates ? "is-located" : ""}
-          inputMode={locationMode === "postal_or_coordinates" ? "numeric" : undefined}
-          onChange={(event) => {
-            const value = event.target.value;
-            setDraft((current) => ({ ...current, location: value, latitude: undefined, longitude: undefined }));
-            onLocationEdit();
-          }}
-          placeholder={locationMode === "text_or_coordinates" ? "ZIP, city, or address" : locationMode === "postal_or_coordinates" ? "ZIP" : "Location"}
-          ref={locationInput}
-          value={draft.location}
-        />
-        <button aria-label="Use my location" aria-pressed={hasCoordinates} className={`icon-button locate${locating ? " is-busy" : ""}`} onClick={onLocate} type="button"><LocateIcon /></button>
-      </div>
-      {locationProblem ? <p className="field-error" id={locationProblemID} role="alert">{locationProblem}</p> : error === "location" ? errorNode : null}
+      <div className="sheet-body">
+        {error === "movie" ? errorNode : null}
+        {providerState === "discovery" ? <p className="notice"><FilmIcon size={16} />Showtimes only — this source has no seat maps.</p> : null}
+        {providerState === "unconfigured" || providerState === "unavailable" ? <p className="notice is-error" role="alert"><AlertIcon size={16} />Live source unavailable.</p> : null}
 
-      <DateRange
-        end={draft.dateEnd}
-        onChange={(dateStart, dateEnd) => setDraft((current) => ({ ...current, dateStart, dateEnd }))}
-        onZone={() => openFiltersAndFocus(() => timezoneInput.current)}
-        start={draft.dateStart}
-        timeZone={isValidTimeZone(draft.timezone) ? draft.timezone : "UTC"}
-        zone={zone}
-      />
-
-      <div className="party-row">
-        <Stepper label="Seats" max={8} min={1} onChange={(value) => update("tickets", value)} value={draft.tickets}>
-          <span aria-hidden="true" className="seat-glyphs">{Array.from({ length: draft.tickets }, (_, index) => <SeatIcon key={index} size={18} />)}</span>
-        </Stepper>
-      </div>
-
-      <ProfilePicker onChange={(profile) => update("profile", profile)} value={draft.profile} />
-      <Reveal open={draft.profile === "custom"}>
-        <CustomSeatZonePicker onChange={(zone) => update("customSeatZone", zone)} value={draft.customSeatZone} />
-      </Reveal>
-
-      <button aria-expanded={filtersOpen} className={`filters-toggle${filtersOpen ? " is-open" : ""}`} onClick={() => setFiltersOpen((open) => !open)} type="button">
-        <SlidersIcon />
-        <span>Filters</span>
-        {filterCount ? <b className="badge">{filterCount}</b> : null}
-      </button>
-      <Reveal open={filtersOpen}>
-        <div className="filters">
-          <FilterGroup label="Time">
-            <Segmented label="Time window" name="time-mode" onChange={(value) => update("timeMode", value as TimeMode)} options={timeModes} value={draft.timeMode} />
-            {draft.timeMode !== "any" ? (
-              <div className="time-inputs">
-                {draft.timeMode !== "before" ? <input aria-label={draft.timeMode === "after" ? "After" : "From"} onChange={(event) => update("startTime", event.target.value)} type="time" value={draft.startTime} /> : null}
-                {draft.timeMode === "inside" || draft.timeMode === "outside" ? <span aria-hidden="true">–</span> : null}
-                {draft.timeMode !== "after" ? <input aria-label={draft.timeMode === "before" ? "Before" : "To"} onChange={(event) => update("endTime", event.target.value)} type="time" value={draft.endTime} /> : null}
-              </div>
-            ) : null}
-          </FilterGroup>
-
-          <fieldset aria-describedby={error === "formats" ? errorID : undefined} className={`filter-group${shaking === "formats" ? " shake" : ""}`} ref={formatsGroup}>
-            <legend>Format</legend>
-            <div className="chips">
-              {formatOptions.map((format) => (
-                <label className="chip" key={format}>
-                  <input
-                    checked={draft.formats.includes(format)}
-                    onChange={() => setDraft((current) => ({ ...current, formats: current.formats.includes(format) ? current.formats.filter((item) => item !== format) : [...current.formats, format] }))}
-                    type="checkbox"
-                  />
-                  <span>{format}</span>
-                </label>
-              ))}
-            </div>
-            {error === "formats" ? errorNode : null}
-          </fieldset>
-
-          <FilterGroup label="Distance">
-            <Range label="Distance" max={49} min={2} onChange={(value) => update("maxDistance", value)} suffix=" mi" value={draft.maxDistance} />
-          </FilterGroup>
-
-          <FilterGroup label="Price">
-            <div className="inline-controls">
-              <Switch checked={draft.limitPrice} label="Limit total" onChange={(value) => update("limitPrice", value)} />
-              {draft.limitPrice ? <Range label="Maximum total" max={200} min={10} onChange={(value) => update("maxPrice", value)} prefix="$" step={5} value={draft.maxPrice} /> : null}
-            </div>
-          </FilterGroup>
-
-          <FilterGroup label="Seats">
-            <div className="toggle-grid">
-              <Switch checked={draft.recliners} label="Recliners" onChange={(value) => update("recliners", value)} />
-              <Switch checked={draft.allowSplit} label="Split party" onChange={(value) => update("allowSplit", value)} />
-              <Stepper label="Skip front rows" max={4} min={0} onChange={(value) => update("excludeFirstRows", value)} value={draft.excludeFirstRows} />
-            </div>
-          </FilterGroup>
-
-          <FilterGroup icon={<WheelchairIcon size={16} />} label="Access">
-            <div className="toggle-grid">
-              <Stepper label="Wheelchair spaces" max={4} min={0} onChange={(value) => update("wheelchairSpaces", value)} value={draft.wheelchairSpaces} />
-              <Stepper label="Companion seats" max={4} min={0} onChange={(value) => update("companionSeats", value)} value={draft.companionSeats} />
-              <Switch checked={draft.audioDescription} label="Audio description" onChange={(value) => update("audioDescription", value)} />
-            </div>
-            <Segmented label="Captions" name="captions" onChange={(value) => update("captions", value)} options={captionModes} value={draft.captions} />
-          </FilterGroup>
-
-          <FilterGroup label="Timezone">
-            <input
-              aria-describedby={error === "timezone" ? errorID : undefined}
-              aria-invalid={!isValidTimeZone(draft.timezone)}
-              aria-label="Timezone"
-              className={`text-input${shaking === "timezone" ? " shake" : ""}`}
-              list="centerseat-timezones"
-              onChange={(event) => update("timezone", event.target.value)}
-              ref={timezoneInput}
-              value={draft.timezone}
-            />
-            <datalist id="centerseat-timezones">{timezoneOptions.map((timezone) => <option key={timezone} value={timezone} />)}</datalist>
-            {error === "timezone" ? errorNode : null}
-          </FilterGroup>
+        <div className={`field${shaking === "location" ? " shake" : ""}`}>
+          <span aria-hidden="true" className="slot"><PinIcon /></span>
+          <input
+            aria-describedby={locationProblem ? locationProblemID : error === "location" ? errorID : undefined}
+            aria-invalid={Boolean(locationProblem) || error === "location"}
+            aria-label="Location"
+            autoComplete="postal-code"
+            className={hasCoordinates ? "is-located" : ""}
+            inputMode={locationMode === "postal_or_coordinates" ? "numeric" : undefined}
+            onChange={(event) => {
+              const value = event.target.value;
+              setDraft((current) => ({ ...current, location: value, latitude: undefined, longitude: undefined }));
+              onLocationEdit();
+            }}
+            placeholder={locationMode === "text_or_coordinates" ? "ZIP, city, or address" : locationMode === "postal_or_coordinates" ? "ZIP" : "Location"}
+            ref={locationInput}
+            value={draft.location}
+          />
+          <button aria-label="Use my location" aria-pressed={hasCoordinates} className={`icon-button locate${locating ? " is-busy" : ""}`} onClick={onLocate} type="button"><LocateIcon /></button>
         </div>
-      </Reveal>
+        {locationProblem ? <p className="field-error" id={locationProblemID} role="alert">{locationProblem}</p> : error === "location" ? errorNode : null}
 
-      {shareErrors.length ? <p className="notice is-warning" role="alert">Ignored from link: {shareErrors.join(" · ")}</p> : null}
-      {problem ? <p className="notice is-error" role="alert"><b>{problem.title}</b> {problem.detail}</p> : null}
+        <DateRange
+          end={draft.dateEnd}
+          onChange={(dateStart, dateEnd) => setDraft((current) => ({ ...current, dateStart, dateEnd }))}
+          onZone={() => openFiltersAndFocus(() => timezoneInput.current)}
+          start={draft.dateStart}
+          timeZone={isValidTimeZone(draft.timezone) ? draft.timezone : "UTC"}
+          zone={zone}
+        />
 
-      <button className="search-button" disabled={searching || !sourceReady} type="submit">
-        <span>{providerState === "discovery" ? "Find showtimes" : "Search"}</span>
-        <ArrowRightIcon />
-      </button>
+        <SeatCount onChange={(value) => update("tickets", value)} value={draft.tickets} />
+
+        <ProfilePicker onChange={(profile) => update("profile", profile)} value={draft.profile} />
+        <Reveal open={draft.profile === "custom"}>
+          <CustomSeatZonePicker onChange={(zone) => update("customSeatZone", zone)} value={draft.customSeatZone} />
+        </Reveal>
+
+        <button aria-expanded={filtersOpen} className="field filters-toggle" onClick={() => setFiltersOpen((open) => !open)} type="button">
+          <span aria-hidden="true" className="slot"><SlidersIcon /></span>
+          <span>Filters</span>
+          {filterCount ? <b className="badge">{filterCount}</b> : null}
+          <span aria-hidden="true" className="slot chevron"><ChevronRightIcon /></span>
+        </button>
+        <Reveal open={filtersOpen}>
+          <div className="filters">
+            <FilterGroup label="Time">
+              <Segmented label="Time window" name="time-mode" onChange={(value) => update("timeMode", value as TimeMode)} options={timeModes} value={draft.timeMode} />
+              {draft.timeMode !== "any" ? (
+                <div className="time-inputs">
+                  {draft.timeMode !== "before" ? <input aria-label={draft.timeMode === "after" ? "After" : "From"} onChange={(event) => update("startTime", event.target.value)} type="time" value={draft.startTime} /> : null}
+                  {draft.timeMode === "inside" || draft.timeMode === "outside" ? <span aria-hidden="true">–</span> : null}
+                  {draft.timeMode !== "after" ? <input aria-label={draft.timeMode === "before" ? "Before" : "To"} onChange={(event) => update("endTime", event.target.value)} type="time" value={draft.endTime} /> : null}
+                </div>
+              ) : null}
+            </FilterGroup>
+
+            <fieldset aria-describedby={error === "formats" ? errorID : undefined} className={`filter-group${shaking === "formats" ? " shake" : ""}`} ref={formatsGroup}>
+              <legend>Format</legend>
+              <div className="chips">
+                {formatOptions.map((format) => (
+                  <label className="chip" key={format}>
+                    <input
+                      checked={draft.formats.includes(format)}
+                      onChange={() => setDraft((current) => ({ ...current, formats: current.formats.includes(format) ? current.formats.filter((item) => item !== format) : [...current.formats, format] }))}
+                      type="checkbox"
+                    />
+                    <span>{format}</span>
+                  </label>
+                ))}
+              </div>
+              {error === "formats" ? errorNode : null}
+            </fieldset>
+
+            <FilterGroup label="Distance">
+              <div className="list">
+                <Range label="Distance" max={49} min={2} onChange={(value) => update("maxDistance", value)} suffix=" mi" value={draft.maxDistance} />
+              </div>
+            </FilterGroup>
+
+            <FilterGroup label="Price">
+              <div className="list">
+                <Switch checked={draft.limitPrice} label="Limit total" onChange={(value) => update("limitPrice", value)} />
+                {draft.limitPrice ? <Range label="Maximum total" max={200} min={10} onChange={(value) => update("maxPrice", value)} prefix="$" step={5} value={draft.maxPrice} /> : null}
+              </div>
+            </FilterGroup>
+
+            <FilterGroup label="Seats">
+              <div className="list">
+                <Switch checked={draft.recliners} label="Recliners" onChange={(value) => update("recliners", value)} />
+                <Switch checked={draft.allowSplit} label="Split party" onChange={(value) => update("allowSplit", value)} />
+                <Stepper label="Skip front rows" max={4} min={0} onChange={(value) => update("excludeFirstRows", value)} value={draft.excludeFirstRows} />
+              </div>
+            </FilterGroup>
+
+            <FilterGroup icon={<WheelchairIcon size={16} />} label="Access">
+              <div className="list">
+                <Stepper label="Wheelchair spaces" max={4} min={0} onChange={(value) => update("wheelchairSpaces", value)} value={draft.wheelchairSpaces} />
+                <Stepper label="Companion seats" max={4} min={0} onChange={(value) => update("companionSeats", value)} value={draft.companionSeats} />
+                <Switch checked={draft.audioDescription} label="Audio description" onChange={(value) => update("audioDescription", value)} />
+              </div>
+            </FilterGroup>
+
+            <FilterGroup label="Captions">
+              <Segmented label="Captions" name="captions" onChange={(value) => update("captions", value)} options={captionModes} value={draft.captions} />
+            </FilterGroup>
+
+            <FilterGroup label="Timezone">
+              <input
+                aria-describedby={error === "timezone" ? errorID : undefined}
+                aria-invalid={!isValidTimeZone(draft.timezone)}
+                aria-label="Timezone"
+                className={`text-input${shaking === "timezone" ? " shake" : ""}`}
+                list="centerseat-timezones"
+                onChange={(event) => update("timezone", event.target.value)}
+                ref={timezoneInput}
+                value={draft.timezone}
+              />
+              <datalist id="centerseat-timezones">{timezoneOptions.map((timezone) => <option key={timezone} value={timezone} />)}</datalist>
+              {error === "timezone" ? errorNode : null}
+            </FilterGroup>
+          </div>
+        </Reveal>
+
+        {shareErrors.length ? <p className="notice is-warning" role="alert"><AlertIcon size={16} />Ignored from link: {shareErrors.join(" · ")}</p> : null}
+        {problem ? <p className="notice is-error" role="alert"><AlertIcon size={16} /><b>{problem.title}</b> {problem.detail}</p> : null}
+      </div>
+
+      <footer className="sheet-foot">
+        <button className="search-button" disabled={searching || !sourceReady} type="submit">
+          <span>{providerState === "discovery" ? "Find showtimes" : "Search"}</span>
+          <ArrowRightIcon />
+        </button>
+      </footer>
 
       {searching ? <Scanner /> : null}
     </form>
@@ -466,42 +482,36 @@ function DateRange({ start, end, timeZone, zone, onChange, onZone }: {
   const outsideStrip = start < days[0] || end > days[days.length - 1] || end < start;
   const [calendar, setCalendar] = useState(outsideStrip);
   const [extending, setExtending] = useState(false);
-  const monthOf = (day: string) => new Intl.DateTimeFormat("en-US", { month: "short", timeZone: "UTC" }).format(new Date(`${day}T12:00:00Z`));
 
   return (
-    <div className="date-range">
-      <div className="date-strip" role="group" aria-label="Dates">
-        {days.map((day, index) => {
-          const date = new Date(`${day}T12:00:00Z`);
-          const inRange = day >= start && day <= end;
-          const edge = day === start || day === end;
-          const showMonth = index === 0 || day.endsWith("-01");
-          return (
-            <button
-              aria-label={new Intl.DateTimeFormat("en-US", { weekday: "long", month: "long", day: "numeric", timeZone: "UTC" }).format(date)}
-              aria-pressed={inRange}
-              className={`day${inRange ? " in-range" : ""}${edge ? " is-edge" : ""}${day === start ? " is-start" : ""}${day === end ? " is-end" : ""}${index === 0 ? " is-today" : ""}`}
-              key={day}
-              onClick={() => {
-                if (extending && day >= start) {
-                  onChange(start, day);
-                  setExtending(false);
-                } else {
-                  onChange(day, day);
-                  setExtending(true);
-                }
-              }}
-              type="button"
-            >
-              <small>{showMonth ? monthOf(day) : new Intl.DateTimeFormat("en-US", { weekday: "narrow", timeZone: "UTC" }).format(date)}</small>
-              <b>{Number(day.slice(8))}</b>
-            </button>
-          );
-        })}
-      </div>
-      <div className="date-tools">
-        <button aria-expanded={calendar} aria-label="Pick exact dates" className={`icon-button${calendar ? " is-active" : ""}`} onClick={() => setCalendar((value) => !value)} type="button"><CalendarIcon /></button>
+    <div className="card dates">
+      <div className="dates-head">
+        <button aria-expanded={calendar} aria-label="Exact dates" className="icon-button" onClick={() => setCalendar((value) => !value)} type="button"><CalendarIcon /></button>
+        <span className="dates-summary">{end < start ? rangeLabel.format(noon(start)) : rangeLabel.formatRange(noon(start), noon(end))}</span>
         <button aria-label={`Timezone ${timeZone}`} className="zone-chip" onClick={onZone} title={timeZone} type="button">{zone}</button>
+      </div>
+      <div aria-hidden="true" className="weekdays">{days.slice(0, 7).map((day) => <span key={day}>{weekdayLetter.format(noon(day))}</span>)}</div>
+      <div aria-label="Dates" className="days" role="group">
+        {days.map((day, index) => (
+          <button
+            aria-label={dayLabel.format(noon(day))}
+            aria-pressed={day >= start && day <= end}
+            className={`day${day >= start && day <= end ? " in-range" : ""}${day === start ? " is-start" : ""}${day === end ? " is-end" : ""}${index === 0 ? " is-today" : ""}`}
+            key={day}
+            onClick={() => {
+              if (extending && day >= start) {
+                onChange(start, day);
+                setExtending(false);
+              } else {
+                onChange(day, day);
+                setExtending(true);
+              }
+            }}
+            type="button"
+          >
+            <b>{Number(day.slice(8))}</b>
+          </button>
+        ))}
       </div>
       <Reveal open={calendar}>
         <div className="date-inputs">
@@ -510,6 +520,44 @@ function DateRange({ start, end, timeZone, zone, onChange, onZone }: {
           <input aria-label="Through" min={start} onChange={(event) => event.target.value && onChange(start, event.target.value)} type="date" value={end} />
         </div>
       </Reveal>
+    </div>
+  );
+}
+
+/** Party size: type the number, or tap the Nth seat to fill 1…N in one move. */
+function SeatCount({ value, onChange }: { value: number; onChange: (value: number) => void }) {
+  return (
+    <div className="field seats">
+      <input
+        aria-label="Seats"
+        className="seat-count"
+        inputMode="numeric"
+        max={maxTickets}
+        min={1}
+        // The last typed digit wins, so typing over the current count needs no clearing.
+        onChange={(event) => {
+          const next = Number(event.target.value.slice(-1));
+          if (next >= 1 && next <= maxTickets) onChange(next);
+        }}
+        onFocus={(event) => event.currentTarget.select()}
+        type="number"
+        value={value}
+      />
+      <div aria-hidden="true" className="seat-pick">
+        {Array.from({ length: maxTickets }, (_, index) => (
+          <button
+            className={index < value ? "is-on" : ""}
+            key={index}
+            onClick={() => onChange(index + 1)}
+            onMouseDown={(event) => event.preventDefault()}
+            style={{ "--i": index } as React.CSSProperties}
+            tabIndex={-1}
+            type="button"
+          >
+            <SeatIcon />
+          </button>
+        ))}
+      </div>
     </div>
   );
 }
@@ -664,13 +712,13 @@ function Segmented({ label, name, options, value, onChange }: { label: string; n
   );
 }
 
-function Stepper({ label, value, min, max, onChange, children }: { label: string; value: number; min: number; max: number; onChange: (value: number) => void; children?: ReactNode }) {
+function Stepper({ label, value, min, max, onChange }: { label: string; value: number; min: number; max: number; onChange: (value: number) => void }) {
   return (
     <div aria-label={label} className="stepper" role="group">
+      <span aria-hidden="true" className="stepper-label">{label}</span>
       <button aria-label={`Fewer ${label.toLowerCase()}`} className="icon-button" disabled={value <= min} onClick={() => onChange(value - 1)} type="button"><MinusIcon size={16} /></button>
-      <output aria-live="polite" className="stepper-value"><b key={value}>{value}</b>{children}</output>
+      <output aria-live="polite" className="stepper-value"><b key={value}>{value}</b></output>
       <button aria-label={`More ${label.toLowerCase()}`} className="icon-button" disabled={value >= max} onClick={() => onChange(value + 1)} type="button"><PlusIcon size={16} /></button>
-      {children ? null : <span className="stepper-label">{label}</span>}
     </div>
   );
 }
@@ -678,8 +726,8 @@ function Stepper({ label, value, min, max, onChange, children }: { label: string
 function Switch({ label, checked, onChange }: { label: string; checked: boolean; onChange: (checked: boolean) => void }) {
   return (
     <button aria-checked={checked} className="switch" onClick={() => onChange(!checked)} role="switch" type="button">
-      <i aria-hidden="true" />
       <span>{label}</span>
+      <i aria-hidden="true" />
     </button>
   );
 }

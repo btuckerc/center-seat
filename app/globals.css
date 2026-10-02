@@ -25,7 +25,16 @@
   --t-sheet: 240ms;
   --ease-out: cubic-bezier(0.2, 0.8, 0.2, 1);
   --ease-in: cubic-bezier(0.4, 0, 1, 1);
-  --radius: 14px;
+  /* Geometry (see the sheet anatomy below): every number derives from the 56px row and its 6px inset. */
+  --row: 56px;
+  --slot: 56px;
+  --inset: 6px;
+  --r-card: 16px;
+  --r-inner: 10px;
+  --r-sheet: 24px;
+  --gutter: 24px;
+  --field: rgba(255, 255, 255, 0.04);
+  --edge: inset 0 0 0 1px var(--line);
   --safe-bottom: env(safe-area-inset-bottom, 0px);
 }
 
@@ -57,6 +66,7 @@ body.modal-open {
 
 h1,
 h2,
+h3,
 p,
 ul,
 ol,
@@ -135,7 +145,7 @@ kbd,
 
 .icon-button {
   align-items: center;
-  border-radius: 12px;
+  border-radius: var(--r-inner);
   color: var(--text);
   display: inline-grid;
   flex: none;
@@ -208,31 +218,26 @@ kbd,
   opacity: 0.45;
 }
 
+/* A text row: the 16px glyph centres in the 56px leading slot, text runs on the row text column. */
 .notice {
-  align-items: center;
   background: rgba(255, 255, 255, 0.05);
-  border-radius: 12px;
+  border-radius: var(--r-card);
   color: var(--muted);
-  display: flex;
-  font-size: 13px;
-  gap: 8px;
-  padding: 10px 12px;
+  font-size: 14px;
+  line-height: 20px;
+  padding: 18px 16px 18px var(--slot);
+  position: relative;
 }
 
 .notice svg {
-  flex: none;
+  left: 20px;
+  position: absolute;
+  top: 20px;
 }
 
 .notice.is-error {
   background: var(--danger-tint);
   color: #f6c2b3;
-  display: block;
-}
-
-.notice.is-error svg {
-  display: inline;
-  margin-right: 6px;
-  vertical-align: -3px;
 }
 
 .notice.is-warning {
@@ -268,7 +273,7 @@ kbd,
 
 .brand {
   align-items: center;
-  border-radius: 12px;
+  border-radius: var(--r-inner);
   display: inline-flex;
   flex: none;
   font-size: 15px;
@@ -278,21 +283,37 @@ kbd,
   padding: 6px 8px 6px 0;
 }
 
+/* 32px tile: 6px of the 44px brand button above and below, the same inset as in-card controls. */
 .brand-mark {
-  align-items: center;
-  background: var(--gold);
-  border-radius: 10px;
-  color: #1a1206;
-  display: inline-grid;
-  height: 32px;
-  justify-items: center;
-  transition: rotate var(--t-panel) var(--ease-out), scale var(--t-panel) var(--ease-out);
-  width: 32px;
+  background: var(--surface-2);
+  border-radius: var(--r-inner);
+  box-shadow: var(--edge);
+  flex: none;
 }
 
-.brand:hover .brand-mark {
-  rotate: -8deg;
-  scale: 1.06;
+.brand-screen {
+  fill: none;
+  stroke: var(--text);
+  stroke-linecap: round;
+  stroke-opacity: 0.75;
+  stroke-width: 1.75;
+}
+
+.brand-seat {
+  fill: var(--text);
+  fill-opacity: 0.32;
+}
+
+.brand-seat.is-lit {
+  fill: var(--gold);
+  fill-opacity: 1;
+  transform-box: fill-box;
+  transform-origin: center;
+  transition: scale var(--t-panel) var(--ease-out);
+}
+
+.brand:hover .brand-seat.is-lit {
+  scale: 1.3;
 }
 
 .query-chip {
@@ -418,21 +439,34 @@ kbd,
   max-width: 13ch;
 }
 
+/*
+ * Mirrored ends: a 32px slot inset 16px at each end is concentric with the 32px end radius,
+ * so the glyph and the keycap sit at the centres of the two semicircles.
+ */
 .search-pill {
   align-items: center;
   background: var(--text);
   border-radius: 32px;
-  box-shadow: 0 0 0 0 rgba(239, 201, 109, 0);
   color: var(--bg);
   display: flex;
   font-size: 17px;
   font-weight: 500;
-  gap: 14px;
+  gap: 12px;
   height: 64px;
   max-width: 560px;
-  padding: 0 12px 0 24px;
+  padding: 0 16px;
   transition: translate var(--t-control) var(--ease-out), scale var(--t-control) var(--ease-out), background-color var(--t-control);
   width: 100%;
+}
+
+.search-pill svg {
+  flex: none;
+  margin-inline: 5px;
+}
+
+.search-pill span {
+  flex: 1;
+  text-align: left;
 }
 
 .search-pill:hover {
@@ -446,15 +480,15 @@ kbd,
 }
 
 .search-pill kbd {
-  border: 1px solid rgba(20, 15, 18, 0.2);
-  border-radius: 9px;
+  border-radius: 50%;
+  box-shadow: inset 0 0 0 1px rgba(20, 15, 18, 0.18);
   color: rgba(20, 15, 18, 0.55);
   display: grid;
+  flex: none;
   font-size: 14px;
-  height: 34px;
-  margin-left: auto;
+  height: 32px;
   place-items: center;
-  width: 34px;
+  width: 32px;
 }
 
 .movie-rail {
@@ -522,7 +556,7 @@ kbd,
 .poster-art {
   aspect-ratio: 2 / 3;
   background: var(--surface-2);
-  border-radius: var(--radius);
+  border-radius: var(--r-card);
   display: grid;
   overflow: hidden;
   place-items: center;
@@ -587,7 +621,14 @@ kbd,
   color: var(--gold);
 }
 
-/* ───────── Sheet ───────── */
+/*
+ * ───────── Sheet ─────────
+ * Anatomy: head (identity + close), body (scrolls), foot (primary action; never scrolls away).
+ * Every body row is a 56px card spanning gutter to gutter. Its 56px leading and trailing slots hold either a
+ * 20px glyph or a 44px control inset 6px; both centre 28px from the card edge, so glyphs, controls and the
+ * head's close button share one column on each side. Row text starts at the slot edge, 56px in.
+ * Radii nest: 16px cards hold 10px controls (16 − 6).
+ */
 
 .sheet-layer {
   animation: fade-in var(--t-panel) var(--ease-out);
@@ -609,15 +650,13 @@ kbd,
 .sheet {
   animation: sheet-in var(--t-sheet) var(--ease-out);
   background: var(--surface);
-  border: 1px solid var(--line);
-  border-radius: 24px;
-  box-shadow: 0 30px 80px rgba(0, 0, 0, 0.55);
+  border-radius: var(--r-sheet);
+  box-shadow: var(--edge), 0 30px 80px rgba(0, 0, 0, 0.55);
+  display: flex;
+  flex-direction: column;
   max-height: min(880px, calc(100dvh - 48px));
-  overflow-y: auto;
-  overscroll-behavior: contain;
-  padding: 20px 24px 24px;
+  overflow: hidden;
   position: relative;
-  scrollbar-width: thin;
   width: min(560px, 100%);
 }
 
@@ -625,13 +664,57 @@ kbd,
   animation: sheet-out var(--t-panel) var(--ease-in) forwards;
 }
 
+.sheet-head {
+  align-items: center;
+  border-bottom: 1px solid var(--line);
+  display: flex;
+  flex: none;
+  padding: 12px var(--gutter);
+  position: relative;
+  transition: border-color var(--t-control);
+  z-index: 2;
+}
+
+.sheet-title {
+  flex: 1;
+  font-size: 17px;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+  min-width: 0;
+}
+
+/* Inset 6px like every trailing control, so its centre lands on the cards' trailing column. */
 .sheet-close {
-  background: var(--surface);
-  float: right;
-  margin: -6px -10px 0 8px;
-  position: sticky;
-  top: 0;
-  z-index: 3;
+  color: var(--muted);
+  margin-inline: var(--inset);
+}
+
+.sheet-close:hover:not(:disabled) {
+  color: var(--text);
+}
+
+/* Flex, not grid: a closed reveal's negative margin must cancel its gap, which grid tracks ignore. */
+.sheet-body {
+  --gap: 16px;
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: var(--gap);
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: var(--gutter);
+  scrollbar-width: thin;
+}
+
+.sheet-body > * {
+  flex-shrink: 0;
+}
+
+.sheet-foot {
+  border-top: 1px solid var(--line);
+  flex: none;
+  padding: 16px var(--gutter) var(--gutter);
 }
 
 .info-sheet {
@@ -640,89 +723,78 @@ kbd,
 
 /* ───────── Query form ───────── */
 
+/* Head, body and foot stay on their own rows so the scanner can cover body and foot while the title stays readable. */
 .query-form {
-  --gap: 14px;
   display: grid;
-  gap: var(--gap);
-  position: relative;
+  flex: 1 1 auto;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  min-height: 0;
 }
 
-.movie-row {
+/* Every child is pinned to the single column; otherwise the scanner's explicit placement pushes the rows into an implicit second column. */
+.query-form > * {
+  grid-column: 1;
+}
+
+.query-form > .sheet-head {
+  grid-row: 1;
+}
+
+.query-form > .sheet-body {
+  grid-row: 2;
+}
+
+.query-form > .sheet-foot {
+  grid-row: 3;
+}
+
+.query-head:has(input:focus) {
+  border-bottom-color: rgba(239, 201, 109, 0.5);
+}
+
+.query-head:has(input[aria-invalid="true"]) {
+  border-bottom-color: var(--danger);
+}
+
+.slot {
   align-items: center;
-  display: flex;
-  gap: 12px;
-  min-height: 72px;
-}
-
-.movie-row-poster {
-  border-radius: 8px;
-  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.4);
-  flex: none;
-  height: 72px;
-  object-fit: cover;
-  width: 48px;
-}
-
-.movie-row-icon {
-  background: var(--surface-2);
-  border-radius: 12px;
+  align-self: stretch;
   color: var(--muted);
-  display: grid;
+  display: flex;
   flex: none;
-  height: 48px;
-  place-items: center;
-  width: 48px;
+  justify-content: center;
+  width: var(--slot);
+}
+
+/* 2:3 poster, 54px tall inside the 56px row. */
+.query-poster {
+  border-radius: var(--inset);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.45);
+  height: 54px;
+  object-fit: cover;
+  width: 36px;
 }
 
 .movie-field {
   flex: 1;
   min-width: 0;
-  position: relative;
-}
-
-.movie-field input,
-.location-row input,
-.text-input,
-.date-inputs input,
-.time-inputs input {
-  background: rgba(255, 255, 255, 0.04);
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  font-size: 16px;
-  height: 52px;
-  min-width: 0;
-  outline: none;
-  padding: 0 16px;
-  transition: border-color var(--t-control), background-color var(--t-control);
-  width: 100%;
-}
-
-.movie-field input:hover,
-.location-row input:hover,
-.text-input:hover,
-.date-inputs input:hover,
-.time-inputs input:hover {
-  border-color: var(--line-strong);
-}
-
-.movie-field input:focus,
-.location-row input:focus,
-.text-input:focus,
-.date-inputs input:focus,
-.time-inputs input:focus {
-  background: rgba(255, 255, 255, 0.06);
-  border-color: var(--gold);
 }
 
 .movie-field input {
+  background: none;
+  border: 0;
   font-size: 20px;
   font-weight: 600;
-  height: 56px;
+  height: var(--row);
   letter-spacing: -0.01em;
+  outline: none;
+  padding: 0;
+  width: 100%;
 }
 
 .movie-field input::placeholder,
-.location-row input::placeholder {
+.field > input::placeholder {
   color: var(--muted);
   font-weight: 500;
 }
@@ -732,31 +804,30 @@ input[type="time"] {
   color-scheme: dark;
 }
 
+/* Lands exactly on the first card's frame (gutter below the head, gutters at the sides); option text on the text column. */
 .suggestions {
   animation: menu-in var(--t-control) var(--ease-out);
   background: var(--surface-2);
-  border: 1px solid var(--line-strong);
-  border-radius: var(--radius);
-  box-shadow: 0 18px 40px rgba(0, 0, 0, 0.5);
-  left: 0;
+  border-radius: var(--r-card);
+  box-shadow: inset 0 0 0 1px var(--line-strong), 0 18px 40px rgba(0, 0, 0, 0.5);
+  left: var(--gutter);
   max-height: 290px;
   overflow-y: auto;
-  padding: 6px;
+  padding: var(--inset);
   position: absolute;
-  right: 0;
-  top: calc(100% + 6px);
+  right: var(--gutter);
+  top: calc(100% + 1px + var(--gutter));
   transform-origin: top center;
-  z-index: 6;
 }
 
 .suggestions button {
   align-items: center;
-  border-radius: 10px;
+  border-radius: var(--r-inner);
   display: flex;
   gap: 12px;
   justify-content: space-between;
   min-height: 44px;
-  padding: 0 12px;
+  padding: 0 16px 0 calc(var(--slot) - var(--inset));
   text-align: left;
   width: 100%;
 }
@@ -771,163 +842,257 @@ input[type="time"] {
   background: rgba(255, 255, 255, 0.08);
 }
 
-.location-row {
+/* Cards: the edge is an inset shadow, so it never shifts the 6px inset geometry. */
+.card,
+.field {
+  background: var(--field);
+  border-radius: var(--r-card);
+  box-shadow: var(--edge);
+  transition: box-shadow var(--t-control), background-color var(--t-control);
+}
+
+.field {
   align-items: center;
   display: flex;
-  gap: 6px;
-  position: relative;
+  min-height: var(--row);
 }
 
-.field-icon {
-  color: var(--muted);
-  left: 16px;
-  pointer-events: none;
-  position: absolute;
+.field:hover {
+  box-shadow: inset 0 0 0 1px var(--line-strong);
 }
 
-.location-row input {
-  padding-left: 46px;
+.field:has(input:focus) {
+  background: rgba(255, 255, 255, 0.06);
+  box-shadow: inset 0 0 0 1px var(--gold);
 }
 
-.location-row input.is-located {
+.field:has([aria-invalid="true"]) {
+  box-shadow: inset 0 0 0 1px var(--danger);
+}
+
+.field > input {
+  background: none;
+  border: 0;
+  flex: 1;
+  font-size: 16px;
+  height: var(--row);
+  min-width: 0;
+  outline: none;
+  padding: 0;
+}
+
+.field > input.is-located {
   color: var(--gold);
+}
+
+.field > .icon-button {
+  margin-inline: var(--inset);
 }
 
 .locate.is-busy svg {
   animation: spin 900ms linear infinite;
 }
 
+/* Errors sit on the row text column, half a gap under their row. */
 .field-error {
   animation: drop-in var(--t-panel) var(--ease-out);
   color: #f6b4a3;
   font-size: 13px;
-  margin: calc(var(--gap) * -0.5) 0 0 4px;
+  margin: calc(var(--gap) * -0.5) 0 0 var(--slot);
+}
+
+.filter-group .field-error {
+  margin: 0;
 }
 
 /* Dates */
 
-.date-range {
-  align-items: center;
+/*
+ * One card: a 56px head row (calendar toggle · range · zone), weekday letters, then two weeks as a 7×2 grid.
+ * Columns start on today's weekday; no day is ever scrolled out of view.
+ */
+.dates {
   display: grid;
-  gap: 8px;
-  grid-template-columns: minmax(0, 1fr) auto;
 }
 
-.date-range > .reveal {
-  grid-column: 1 / -1;
-}
-
-.date-range > .reveal:not(.is-open) {
-  margin-top: -8px;
-}
-
-.date-strip {
+.dates-head {
+  align-items: center;
   display: flex;
-  mask-image: linear-gradient(90deg, #000 88%, transparent);
-  overflow-x: auto;
-  overscroll-behavior-x: contain;
-  padding: 2px 24px 2px 2px;
-  scroll-snap-type: x proximity;
-  scrollbar-width: none;
+  gap: var(--inset);
+  height: var(--row);
+  padding: 0 var(--inset);
 }
 
-.date-strip::-webkit-scrollbar {
-  display: none;
+.dates-head > .icon-button {
+  color: var(--muted);
+}
+
+.dates-summary {
+  flex: 1;
+  font-size: 16px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.zone-chip {
+  border-radius: var(--r-inner);
+  color: var(--muted);
+  flex: none;
+  font-size: 12px;
+  font-weight: 600;
+  height: 44px;
+  letter-spacing: 0.04em;
+  min-width: 44px;
+  padding: 0 10px;
+  transition: background-color var(--t-control), color var(--t-control);
+}
+
+.zone-chip:hover {
+  background: rgba(255, 255, 255, 0.07);
+  color: var(--text);
+}
+
+.weekdays,
+.days {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  padding: 0 var(--inset);
+}
+
+.weekdays {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 16px;
+  padding-bottom: 4px;
+  text-align: center;
+}
+
+.days {
+  padding-bottom: var(--inset);
+  row-gap: 4px;
 }
 
 .day {
-  align-content: center;
-  display: grid;
-  flex: 0 0 44px;
-  gap: 2px;
-  height: 58px;
-  justify-items: center;
+  border-radius: var(--r-inner);
+  font-size: 15px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  height: 44px;
   position: relative;
-  scroll-snap-align: start;
-  transition: background-color var(--t-control), color var(--t-control), border-radius var(--t-control);
-}
-
-.day small {
-  color: var(--muted);
-  font-size: 11px;
-  font-weight: 500;
-  text-transform: uppercase;
+  transition: background-color var(--t-control), color var(--t-control);
 }
 
 .day b {
-  font-size: 16px;
-  font-variant-numeric: tabular-nums;
-  font-weight: 600;
+  display: inline-block;
+  font-weight: inherit;
 }
 
-.day:hover {
+.day:hover:not(.in-range) {
   background: rgba(255, 255, 255, 0.06);
-  border-radius: 12px;
 }
 
+/* The range is one continuous band; it rounds where it starts, ends, or wraps to the second week. */
 .day.in-range {
   background: var(--gold-tint);
   border-radius: 0;
 }
 
-.day.is-start {
-  border-radius: 12px 0 0 12px;
+.day.is-start,
+.day.in-range:nth-child(7n + 1) {
+  border-end-start-radius: var(--r-inner);
+  border-start-start-radius: var(--r-inner);
 }
 
+.day.is-end,
+.day.in-range:nth-child(7n) {
+  border-end-end-radius: var(--r-inner);
+  border-start-end-radius: var(--r-inner);
+}
+
+.day.is-start,
 .day.is-end {
-  border-radius: 0 12px 12px 0;
-}
-
-.day.is-start.is-end {
-  border-radius: 12px;
-}
-
-.day.is-edge {
   background: var(--gold);
   color: #1a1206;
 }
 
-.day.is-edge small {
-  color: rgba(26, 18, 6, 0.65);
-}
-
-.day.is-edge b {
+.day.is-start b,
+.day.is-end b {
   animation: pop var(--t-panel) var(--ease-out);
 }
 
 .day.is-today::after {
   background: currentColor;
   border-radius: 50%;
-  bottom: 5px;
+  bottom: 6px;
   content: "";
-  height: 3px;
+  height: 4px;
+  left: calc(50% - 2px);
   opacity: 0.7;
   position: absolute;
-  width: 3px;
+  width: 4px;
 }
 
-.date-tools {
+.date-inputs {
   align-items: center;
-  display: flex;
-  gap: 2px;
-}
-
-.zone-chip {
-  border: 1px solid var(--line);
-  border-radius: 22px;
   color: var(--muted);
-  font-size: 12px;
-  height: 44px;
-  padding: 0 12px;
-  transition: color var(--t-control), border-color var(--t-control);
+  display: flex;
+  gap: var(--inset);
+  padding: 0 var(--inset) var(--inset);
 }
 
-.zone-chip:hover {
-  border-color: var(--line-strong);
+.date-inputs input {
+  background: var(--field);
+  border: 0;
+  border-radius: var(--r-inner);
+  box-shadow: var(--edge);
   color: var(--text);
+  flex: 1;
+  font-variant-numeric: tabular-nums;
+  height: 44px;
+  min-width: 0;
+  outline: none;
+  padding: 0 12px;
 }
 
-.date-inputs,
+.date-inputs input:focus {
+  box-shadow: inset 0 0 0 1px var(--gold);
+}
+
+/* Standalone filter inputs are full rows. */
+.text-input,
+.time-inputs input {
+  background: var(--field);
+  border: 0;
+  border-radius: var(--r-card);
+  box-shadow: var(--edge);
+  color: var(--text);
+  font-size: 16px;
+  height: var(--row);
+  min-width: 0;
+  outline: none;
+  padding: 0 16px;
+  transition: box-shadow var(--t-control), background-color var(--t-control);
+  width: 100%;
+}
+
+.text-input:hover,
+.time-inputs input:hover {
+  box-shadow: inset 0 0 0 1px var(--line-strong);
+}
+
+.text-input:focus,
+.time-inputs input:focus {
+  background: rgba(255, 255, 255, 0.06);
+  box-shadow: inset 0 0 0 1px var(--gold);
+}
+
+.text-input[aria-invalid="true"] {
+  box-shadow: inset 0 0 0 1px var(--danger);
+}
+
 .time-inputs {
   align-items: center;
   color: var(--muted);
@@ -935,37 +1100,148 @@ input[type="time"] {
   gap: 8px;
 }
 
-.date-inputs input,
 .time-inputs input {
-  color: var(--text);
   flex: 1;
   font-variant-numeric: tabular-nums;
-  height: 48px;
 }
 
-/* Party + preference */
+/*
+ * Seats: the count is a 44px field in the leading slot; the eight seats share the rest of the card equally,
+ * from the text column to the card edge, so a 56px-wide seat cell matches a slot.
+ */
+.seats {
+  gap: var(--inset);
+  padding-left: var(--inset);
+}
 
-.party-row {
+.seats > .seat-count {
+  -moz-appearance: textfield;
+  appearance: textfield;
+  background: rgba(255, 255, 255, 0.06);
+  border: 0;
+  border-radius: var(--r-inner);
+  color: var(--text);
+  cursor: text;
+  flex: none;
+  font-size: 18px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 650;
+  height: 44px;
+  outline: none;
+  padding: 0;
+  text-align: center;
+  transition: background-color var(--t-control), color var(--t-control);
+  width: 44px;
+}
+
+.seat-count::-webkit-inner-spin-button,
+.seat-count::-webkit-outer-spin-button {
+  appearance: none;
+  margin: 0;
+}
+
+.seats > .seat-count:hover {
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.seats > .seat-count:focus {
+  background: var(--gold-tint);
+  color: var(--gold);
+}
+
+.seat-pick {
+  display: grid;
+  flex: 1;
+  grid-template-columns: repeat(8, minmax(0, 1fr));
+  min-width: 0;
+}
+
+/* Filling sweeps left to right, 16ms per seat. */
+.seat-pick button {
+  color: rgba(246, 239, 228, 0.24);
+  display: grid;
+  height: 44px;
+  place-items: center;
+  transition: color var(--t-control) var(--ease-out) calc(var(--i) * 16ms), scale var(--t-control) var(--ease-out);
+}
+
+.seat-pick button.is-on {
+  color: var(--gold);
+}
+
+/* Hover previews the count: every seat up to the pointer lights. */
+.seat-pick:has(button:hover) button {
+  color: var(--gold-bright);
+  transition-delay: 0s;
+}
+
+.seat-pick button:hover ~ button {
+  color: rgba(246, 239, 228, 0.24);
+}
+
+.seat-pick button:active {
+  scale: 0.88;
+}
+
+/*
+ * Filter lists: one card, 56px rows, hairlines from the label column. Labels sit 16px in; trailing
+ * controls share the sheet's trailing column (centre 28px from the card edge).
+ */
+.list {
+  background: var(--field);
+  border-radius: var(--r-card);
+  box-shadow: var(--edge);
+  display: grid;
+}
+
+.list > * {
+  align-items: center;
   display: flex;
+  font-size: 16px;
+  gap: 4px;
+  min-height: var(--row);
+  padding-left: 16px;
+  position: relative;
+}
+
+.list > :first-child {
+  border-start-end-radius: inherit;
+  border-start-start-radius: inherit;
+}
+
+.list > :last-child {
+  border-end-end-radius: inherit;
+  border-end-start-radius: inherit;
+}
+
+.list > * + *::before {
+  background: var(--line);
+  content: "";
+  height: 1px;
+  left: 16px;
+  position: absolute;
+  right: 0;
+  top: 0;
 }
 
 .stepper {
-  align-items: center;
-  display: inline-flex;
-  gap: 4px;
+  padding-right: var(--inset);
 }
 
 .stepper .icon-button {
-  border: 1px solid var(--line);
-  border-radius: 50%;
+  box-shadow: var(--edge);
+}
+
+.stepper-label {
+  flex: 1;
+  min-width: 0;
 }
 
 .stepper-value {
   align-items: center;
   display: inline-flex;
-  gap: 10px;
   justify-content: center;
-  min-width: 2.4ch;
+  width: 32px;
 }
 
 .stepper-value b {
@@ -976,26 +1252,10 @@ input[type="time"] {
   font-weight: 650;
 }
 
-.seat-glyphs {
-  color: var(--gold);
-  display: inline-flex;
-  gap: 2px;
-}
-
-.seat-glyphs svg:last-child {
-  animation: pop var(--t-panel) var(--ease-out);
-}
-
-.stepper-label {
-  color: var(--text);
-  font-size: 14px;
-  margin-left: 6px;
-}
-
 .profile-picker {
   border: 0;
   display: grid;
-  gap: 6px;
+  gap: 8px;
   grid-template-columns: repeat(7, minmax(0, 1fr));
   margin: 0;
   min-width: 0;
@@ -1004,20 +1264,19 @@ input[type="time"] {
 
 .profile-tile {
   align-content: start;
-  border: 1px solid var(--line);
-  border-radius: 12px;
+  border-radius: var(--r-card);
+  box-shadow: var(--edge);
   color: var(--muted);
   cursor: pointer;
   display: grid;
-  font-size: 11.5px;
+  font-size: 12px;
   font-weight: 500;
-  gap: 4px;
+  gap: 6px;
   justify-items: center;
-  min-height: 72px;
-  padding: 8px 2px 6px;
+  padding: 10px 2px;
   position: relative;
   text-align: center;
-  transition: background-color var(--t-control), border-color var(--t-control), color var(--t-control), scale var(--t-control) var(--ease-out);
+  transition: background-color var(--t-control), box-shadow var(--t-control), color var(--t-control), scale var(--t-control) var(--ease-out);
 }
 
 .profile-tile input {
@@ -1047,7 +1306,7 @@ input[type="time"] {
 
 .profile-tile:has(input:checked) {
   background: var(--gold-tint);
-  border-color: var(--gold);
+  box-shadow: inset 0 0 0 1px var(--gold);
   color: var(--text);
 }
 
@@ -1099,10 +1358,11 @@ input[type="time"] {
   fill: none;
 }
 
+/* Same card geometry: the reset button is inset 6px top-right, and the screen arc is centred in that 44px band. */
 .custom-zone {
   background: var(--pit);
-  border-radius: 16px;
-  padding: 12px;
+  border-radius: var(--r-card);
+  padding: var(--inset);
   position: relative;
 }
 
@@ -1110,13 +1370,13 @@ input[type="time"] {
   border-radius: 50% 50% 0 0 / 100% 100% 0 0;
   border-top: 2px solid rgba(246, 239, 228, 0.5);
   height: 10px;
-  margin: 0 14% 10px;
+  margin: 17px var(--slot);
 }
 
 .custom-zone-surface {
   aspect-ratio: 16 / 8;
   background: radial-gradient(circle, rgba(255, 255, 255, 0.16) 1.4px, transparent 1.6px) 0 0 / 7.14% 12.5%;
-  border-radius: 10px;
+  border-radius: var(--r-inner);
   cursor: crosshair;
   position: relative;
   touch-action: none;
@@ -1125,47 +1385,45 @@ input[type="time"] {
 .custom-zone-selection {
   background: rgba(239, 201, 109, 0.22);
   border: 2px solid var(--gold);
-  border-radius: 8px;
+  border-radius: var(--inset);
   pointer-events: none;
   position: absolute;
 }
 
 .custom-zone-reset {
   position: absolute;
-  right: 4px;
-  top: 2px;
+  right: var(--inset);
+  top: var(--inset);
 }
 
 /* Filters */
 
+/* A row card: sliders glyph · label · count · chevron in the trailing slot. */
 .filters-toggle {
-  align-items: center;
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  display: flex;
+  font-size: 16px;
   font-weight: 500;
-  gap: 10px;
-  height: 48px;
-  padding: 0 14px;
-  transition: background-color var(--t-control), border-color var(--t-control);
+  text-align: left;
   width: 100%;
 }
 
-.filters-toggle:hover {
-  background: rgba(255, 255, 255, 0.04);
-}
-
-.filters-toggle svg {
+.filters-toggle .slot svg {
   transition: rotate var(--t-panel) var(--ease-out), color var(--t-control);
 }
 
-.filters-toggle.is-open {
-  border-color: var(--line-strong);
+.filters-toggle[aria-expanded="true"] .slot:first-child {
+  color: var(--gold);
 }
 
-.filters-toggle.is-open svg {
-  color: var(--gold);
-  rotate: 180deg;
+.filters-toggle .chevron {
+  margin-left: auto;
+}
+
+.filters-toggle .chevron svg {
+  rotate: 90deg;
+}
+
+.filters-toggle[aria-expanded="true"] .chevron svg {
+  rotate: -90deg;
 }
 
 .badge {
@@ -1177,7 +1435,7 @@ input[type="time"] {
   font-size: 12px;
   font-variant-numeric: tabular-nums;
   height: 22px;
-  margin-left: auto;
+  margin-left: 8px;
   min-width: 22px;
   padding: 0 6px;
   place-items: center;
@@ -1185,14 +1443,14 @@ input[type="time"] {
 
 .filters {
   display: grid;
-  gap: 20px;
-  padding: 6px 2px 4px;
+  gap: 24px;
+  padding-top: 8px;
 }
 
 .filter-group {
   border: 0;
   display: grid;
-  gap: 10px;
+  gap: 8px;
   margin: 0;
   min-width: 0;
   padding: 0;
@@ -1206,16 +1464,18 @@ input[type="time"] {
   font-weight: 600;
   gap: 6px;
   letter-spacing: 0.06em;
-  margin-bottom: 10px;
-  padding: 0;
+  margin-bottom: 12px;
+  padding: 0 0 0 16px;
   text-transform: uppercase;
 }
 
+/* 44px options inset 6px: a 56px row whose inner radius nests (16 − 6). */
 .segmented {
-  background: rgba(255, 255, 255, 0.05);
-  border-radius: var(--radius);
+  background: var(--field);
+  border-radius: var(--r-card);
+  box-shadow: var(--edge);
   display: flex;
-  padding: 4px;
+  padding: var(--inset);
 }
 
 .segmented label {
@@ -1238,7 +1498,7 @@ input[type="time"] {
 }
 
 .segmented span {
-  border-radius: 10px;
+  border-radius: var(--r-inner);
   color: var(--muted);
   cursor: pointer;
   display: grid;
@@ -1263,10 +1523,15 @@ input[type="time"] {
   outline-offset: 1px;
 }
 
+/* Multi-select formats: the segmented card's geometry, 6px between options, gold when chosen. */
 .chips {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
+  background: var(--field);
+  border-radius: var(--r-card);
+  box-shadow: var(--edge);
+  display: grid;
+  gap: var(--inset);
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  padding: var(--inset);
 }
 
 .chip {
@@ -1274,16 +1539,21 @@ input[type="time"] {
 }
 
 .chip span {
-  align-items: center;
-  border: 1px solid var(--line);
-  border-radius: 22px;
+  border-radius: var(--r-inner);
+  color: var(--muted);
   cursor: pointer;
-  display: inline-flex;
-  font-size: 14px;
+  display: grid;
+  font-size: 13px;
+  font-weight: 500;
   height: 44px;
-  padding: 0 16px;
+  place-items: center;
   position: relative;
-  transition: background-color var(--t-control), border-color var(--t-control), color var(--t-control), scale var(--t-control) var(--ease-out);
+  transition: background-color var(--t-control), box-shadow var(--t-control), color var(--t-control), scale var(--t-control) var(--ease-out);
+  white-space: nowrap;
+}
+
+.chip:hover span {
+  color: var(--text);
 }
 
 .chip:active span {
@@ -1292,20 +1562,13 @@ input[type="time"] {
 
 .chip input:checked + span {
   background: var(--gold-tint);
-  border-color: var(--gold);
+  box-shadow: inset 0 0 0 1px var(--gold);
   color: var(--gold);
 }
 
-.chip input:not(:checked) + span {
-  color: var(--muted);
-}
-
 .range {
-  align-items: center;
-  display: flex;
-  flex: 1;
-  gap: 14px;
-  min-width: 180px;
+  gap: 16px;
+  padding-right: 16px;
 }
 
 /* The input is the 44px hit box; the 6px track is drawn inside it. */
@@ -1360,13 +1623,19 @@ input[type="time"] {
   text-align: right;
 }
 
+/* The whole row toggles; the 40px track centres on the trailing column (8 + 20 = 28). */
 .switch {
-  align-items: center;
-  display: inline-flex;
-  font-size: 14px;
-  gap: 10px;
-  min-height: 44px;
+  padding-right: 8px;
   text-align: left;
+  transition: background-color var(--t-control);
+}
+
+.switch:hover {
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.switch span {
+  flex: 1;
 }
 
 .switch i {
@@ -1400,20 +1669,6 @@ input[type="time"] {
   translate: 16px 0;
 }
 
-.inline-controls {
-  align-items: center;
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px 16px;
-}
-
-.toggle-grid {
-  align-items: center;
-  display: grid;
-  gap: 4px 16px;
-  grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
-}
-
 /* Reveal: height animates through grid rows, never through layout-thrashing max-height. */
 
 .reveal {
@@ -1428,7 +1683,7 @@ input[type="time"] {
   opacity: 1;
 }
 
-.query-form > .reveal:not(.is-open) {
+.sheet-body > .reveal:not(.is-open) {
   margin-top: calc(var(--gap) * -1);
 }
 
@@ -1439,32 +1694,22 @@ input[type="time"] {
   padding: 4px;
 }
 
-.query-form .search-button {
-  bottom: 0;
-  box-shadow: 0 12px 0 var(--surface), 0 -14px 18px -4px var(--surface);
-  position: sticky;
-  z-index: 2;
-}
-
-/* Searching: an auditorium sweep replaces the spinner. */
+/* Searching: an auditorium sweep covers body and foot; the head keeps the title in view. */
 
 .scanner {
   animation: fade-in var(--t-panel) var(--ease-out);
   backdrop-filter: blur(3px);
   background: rgba(29, 21, 25, 0.9);
-  border-radius: 16px;
-  inset: -8px;
-  position: absolute;
-  z-index: 8;
+  display: grid;
+  grid-row: 2 / 4;
+  place-items: center;
+  z-index: 3;
 }
 
 .scanner-inner {
   display: grid;
   gap: 18px;
   justify-items: center;
-  padding: 48px 0;
-  position: sticky;
-  top: calc(50% - 120px);
 }
 
 .scanner-inner span {
@@ -1680,7 +1925,7 @@ input[type="time"] {
   animation: menu-in var(--t-control) var(--ease-out);
   background: var(--surface-2);
   border: 1px solid var(--line-strong);
-  border-radius: var(--radius);
+  border-radius: var(--r-card);
   box-shadow: 0 18px 40px rgba(0, 0, 0, 0.5);
   display: grid;
   min-width: 230px;
@@ -1958,7 +2203,7 @@ input[type="time"] {
   animation: drop-in var(--t-panel) var(--ease-out);
   background: var(--danger-tint);
   border: 1px solid rgba(236, 138, 112, 0.3);
-  border-radius: var(--radius);
+  border-radius: var(--r-card);
   color: #f6c7b8;
   display: grid;
   font-size: 14px;
@@ -2026,7 +2271,7 @@ p.alert svg {
   align-items: center;
   background: var(--surface);
   border: 1px solid var(--line);
-  border-radius: var(--radius);
+  border-radius: var(--r-card);
   display: grid;
   gap: 12px;
   grid-template-columns: 5.4em minmax(0, 1fr) auto;
@@ -2138,7 +2383,7 @@ p.alert svg {
 .showtime {
   background: var(--surface);
   border: 1px solid var(--line);
-  border-radius: var(--radius);
+  border-radius: var(--r-card);
   display: grid;
   gap: 2px;
   height: 100%;
@@ -2224,10 +2469,9 @@ a.showtime:hover .showtime-go {
   gap: 10px;
 }
 
-.info h2 {
+.info h3 {
   font-size: 16px;
   font-weight: 650;
-  margin-right: 48px;
 }
 
 .info p {
@@ -2628,12 +2872,26 @@ a.showtime:hover .showtime-go {
     grid-auto-columns: 42vw;
   }
 
+  /* Status pills share the first row with the tools; the seats headline then gets the full width. */
   .stage-head {
-    flex-wrap: wrap;
+    align-items: center;
+    column-gap: 12px;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .stage-title {
+    display: contents;
+  }
+
+  .stage-title h1,
+  .facts {
+    grid-column: 1 / -1;
   }
 
   .stage-tools {
-    margin-left: auto;
+    grid-column: 2;
+    grid-row: 1;
   }
 
   /* The headline already names the seats; tags would collide at this scale. */
@@ -2656,6 +2914,10 @@ a.showtime:hover .showtime-go {
 }
 
 @media (max-width: 640px) {
+  :root {
+    --gutter: 16px;
+  }
+
   .sheet-layer {
     align-items: end;
     padding: 0;
@@ -2664,29 +2926,51 @@ a.showtime:hover .showtime-go {
 
   .sheet {
     animation-name: sheet-up;
-    border-radius: 24px 24px 0 0;
-    border-width: 1px 0 0;
+    border-radius: var(--r-sheet) var(--r-sheet) 0 0;
+    box-shadow: inset 0 1px 0 var(--line), 0 -12px 40px rgba(0, 0, 0, 0.45);
     max-height: calc(100dvh - 24px);
-    padding: 10px 16px calc(16px + var(--safe-bottom));
     width: 100%;
   }
 
+  /* Grabber: 8px from the top edge and 8px above the head's content. */
   .sheet::before {
     background: var(--line-strong);
     border-radius: 3px;
     content: "";
-    display: block;
+    flex: none;
     height: 5px;
-    margin: 0 auto 10px;
+    margin: 8px auto 0;
     width: 40px;
+  }
+
+  .sheet-head {
+    padding-top: 8px;
+  }
+
+  .sheet > .sheet-body,
+  .sheet-foot {
+    padding-bottom: calc(var(--gutter) + var(--safe-bottom));
   }
 
   .sheet-layer.is-closing .sheet {
     animation-name: sheet-down;
   }
 
+  /* Twelve columns: four tiles of three, then three of four, so both rows end flush with the gutter. */
   .profile-picker {
-    grid-template-columns: repeat(4, minmax(0, 1fr));
+    grid-template-columns: repeat(12, minmax(0, 1fr));
+  }
+
+  .profile-tile {
+    grid-column: span 3;
+  }
+
+  .profile-tile:nth-of-type(n + 5) {
+    grid-column: span 4;
+  }
+
+  .chips {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 }
 

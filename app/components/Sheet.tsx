@@ -1,7 +1,15 @@
 "use client";
 
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { createContext, useContext, useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { CloseIcon } from "./icons";
+
+const SheetContext = createContext<{ onClose: () => void; locked: boolean }>({ onClose: () => {}, locked: false });
+
+/** Close control for a sheet head's trailing slot; disabled while the sheet is locked. */
+export function SheetClose() {
+  const { onClose, locked } = useContext(SheetContext);
+  return <button aria-label="Close" className="icon-button sheet-close" disabled={locked} onClick={onClose} type="button"><CloseIcon /></button>;
+}
 
 // Matches --t-panel, the CSS exit animation duration.
 const exitMs = 180;
@@ -11,21 +19,26 @@ const focusable = 'a[href],button:not([disabled]),input:not([disabled]),select:n
  * Modal surface: bottom sheet on narrow screens, centered card otherwise.
  * Traps focus, restores it to the opener, and plays an exit before unmounting.
  */
-export function Sheet({ open, onClose, locked = false, label, className = "", returnFocus, children }: {
+export function Sheet({ open, onClose, locked = false, label, titled = true, className = "", returnFocus, children }: {
   open: boolean;
   onClose: () => void;
   /** Blocks Escape, backdrop, and close button (an in-flight search). */
   locked?: boolean;
   label: string;
+  /** Render `label` as the head title with a scrolling body. Off when the content lays out its own head, body and foot. */
+  titled?: boolean;
   className?: string;
   /** Selector focused on close when the opener has left the page (e.g. replaced by results). */
   returnFocus?: string;
   children: ReactNode;
 }) {
+  const titleID = useId();
   const [mounted, setMounted] = useState(open);
   const [closing, setClosing] = useState(false);
   const panel = useRef<HTMLDivElement>(null);
   const opener = useRef<HTMLElement | null>(null);
+  // How the sheet was last driven: focus returns with a visible ring only after keyboard use.
+  const keyboard = useRef(false);
 
   if (open && (!mounted || closing)) {
     setMounted(true);
@@ -79,16 +92,23 @@ export function Sheet({ open, onClose, locked = false, label, className = "", re
         else item.element.setAttribute("aria-hidden", item.ariaHidden);
       }
       const target = opener.current?.isConnected ? opener.current : returnFocus ? document.querySelector<HTMLElement>(returnFocus) : null;
-      target?.focus({ preventScroll: true });
+      // `focusVisible` is not in TypeScript's DOM lib yet; browsers without it ignore the option.
+      target?.focus({ preventScroll: true, focusVisible: keyboard.current } as FocusOptions);
     };
   }, [open, returnFocus]);
 
   if (!mounted) return null;
 
   return (
-    <div className={`sheet-layer${closing ? " is-closing" : ""}`} onMouseDown={() => !locked && onClose()}>
+    <div
+      className={`sheet-layer${closing ? " is-closing" : ""}`}
+      onKeyDownCapture={() => { keyboard.current = true; }}
+      onMouseDown={() => !locked && onClose()}
+      onPointerDownCapture={() => { keyboard.current = false; }}
+    >
       <div
-        aria-label={label}
+        aria-label={titled ? undefined : label}
+        aria-labelledby={titled ? titleID : undefined}
         aria-modal="true"
         className={`sheet ${className}`}
         onKeyDown={(event) => {
@@ -115,8 +135,17 @@ export function Sheet({ open, onClose, locked = false, label, className = "", re
         role="dialog"
         tabIndex={-1}
       >
-        <button aria-label="Close" className="sheet-close icon-button" disabled={locked} onClick={onClose} type="button"><CloseIcon /></button>
-        {children}
+        <SheetContext value={{ onClose, locked }}>
+          {titled ? (
+            <>
+              <header className="sheet-head">
+                <h2 className="sheet-title" id={titleID}>{label}</h2>
+                <SheetClose />
+              </header>
+              <div className="sheet-body">{children}</div>
+            </>
+          ) : children}
+        </SheetContext>
       </div>
     </div>
   );

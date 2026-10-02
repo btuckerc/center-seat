@@ -23,7 +23,7 @@ export function InfoContent({ recommendation, coverage }: { recommendation?: Rec
     <div className="info">
       {recommendation ? (
         <section>
-          <h2>Why this seat</h2>
+          <h3>Why this seat</h3>
           {lead ? <p>{lead}</p> : null}
           {more.length ? (
             <details className="more">
@@ -45,7 +45,7 @@ export function InfoContent({ recommendation, coverage }: { recommendation?: Rec
 
       {price ? (
         <section>
-          <h2>Price estimate</h2>
+          <h3>Price estimate</h3>
           <dl className="stats">
             <div><dt>Total · {price.ticket_count} ticket{price.ticket_count === 1 ? "" : "s"}</dt><dd>{money(price.estimated_total)}</dd></div>
             <div><dt>Per ticket</dt><dd>{money(price.ticket_price)}</dd></div>
@@ -57,7 +57,7 @@ export function InfoContent({ recommendation, coverage }: { recommendation?: Rec
 
       {coverage ? (
         <section>
-          <h2>Coverage</h2>
+          <h3>Coverage</h3>
           <dl className="stats">
             <div><dt>Dates</dt><dd>{coverage.dates_compared}/{coverage.dates_with_screenings}</dd></div>
             <div><dt>Showtimes</dt><dd>{coverage.screenings_discovered}</dd></div>
@@ -77,7 +77,7 @@ export function InfoContent({ recommendation, coverage }: { recommendation?: Rec
       ) : null}
 
       <section>
-        <h2>How it works</h2>
+        {recommendation || coverage ? <h3>How it works</h3> : null}
         <ol className="steps">
           {steps.map(([title, detail]) => <li key={title}><b>{title}</b><span>{detail}</span></li>)}
         </ol>
