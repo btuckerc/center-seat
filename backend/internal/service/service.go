@@ -14,10 +14,18 @@ import (
 	"centerseat/backend/internal/ranking"
 )
 
+var (
+	ErrScreeningStarted = errors.New("screening started or is inside the minimum start notice")
+	ErrSeatsUnavailable = errors.New("the selected screening no longer has an eligible seat block")
+	ErrPriceExceeded    = errors.New("live ticket price exceeded the query constraint or was unavailable")
+)
+
 type Service struct {
 	discovery providers.Discovery
 	inventory providers.Inventory
 	fanout    int
+	// now decides which screenings have started and stamps result expiry; tests pin it.
+	now func() time.Time
 }
 
 const adaptiveInitialCandidates = 4
@@ -40,7 +48,7 @@ func New(discovery providers.Discovery, inventory providers.Inventory, fanout in
 			fanout = providerLimit
 		}
 	}
-	return &Service{discovery: discovery, inventory: inventory, fanout: fanout}
+	return &Service{discovery: discovery, inventory: inventory, fanout: fanout, now: time.Now}
 }
 
 func (s *Service) ProviderStatuses() []domain.ProviderStatus {
@@ -76,17 +84,20 @@ func (s *Service) MovieSuggestions(ctx context.Context, query string, limit int)
 
 func (s *Service) RefreshRecommendation(ctx context.Context, source domain.Recommendation, q domain.QueryRequest) (domain.Recommendation, error) {
 	q.SetDefaults()
+	if !source.Showtime.StartsAt.After(earliestStart(s.now(), q)) {
+		return domain.Recommendation{}, ErrScreeningStarted
+	}
 	inventory, err := s.inventory.GetAvailability(ctx, source.Showtime, true)
 	if err != nil {
-		return domain.Recommendation{}, err
+		return domain.Recommendation{}, fmt.Errorf("read live inventory: %w", err)
 	}
 	showtime, ok := applyInventoryPricing(source.Showtime, inventory, q)
 	if !ok {
-		return domain.Recommendation{}, errors.New("live ticket price exceeded the query constraint or was unavailable")
+		return domain.Recommendation{}, ErrPriceExceeded
 	}
 	recommendation, ok := ranking.BestBlock(showtime, inventory, q)
 	if !ok {
-		return domain.Recommendation{}, errors.New("the selected screening no longer has an eligible seat block")
+		return domain.Recommendation{}, ErrSeatsUnavailable
 	}
 	recommendation.Rank = source.Rank
 	recommendation.Score = combinedScore(recommendation.Score, showtime, q)
@@ -106,14 +117,14 @@ func (s *Service) Query(ctx context.Context, queryID string, q domain.QueryReque
 	if err != nil {
 		return domain.QueryResponse{}, fmt.Errorf("discover showtimes: %w", err)
 	}
-	eligibleShowtimes := filterAndPrune(showtimes, q)
+	eligibleShowtimes := filterShowtimes(showtimes, q, true, s.now())
 	coverage := domain.Coverage{
 		DatesRequested: dateRangeDays(q.Dates), DatesWithScreenings: distinctShowtimeDates(eligibleShowtimes, q),
 		ScreeningsDiscovered: len(showtimes), ScreeningsPruned: len(eligibleShowtimes),
 		InventoryFailureReasons: map[string]int{}, DiscoveryMS: int(time.Since(discoveryStarted).Milliseconds()),
 	}
 	if len(eligibleShowtimes) == 0 {
-		now := time.Now().UTC()
+		now := s.now().UTC()
 		coverage.ElapsedMS = int(time.Since(started).Milliseconds())
 		return domain.QueryResponse{QueryID: queryID, Status: "no_match", GeneratedAt: now, ExpiresAt: now.Add(30 * time.Second), Coverage: coverage, Alternatives: []domain.Recommendation{}, Warnings: []string{"No screenings matched every hard constraint"}}, nil
 	}
@@ -261,9 +272,9 @@ func (s *Service) Query(ctx context.Context, queryID string, q domain.QueryReque
 		}
 	}
 
-	now := time.Now().UTC()
+	now := s.now().UTC()
 	coverage.ElapsedMS = int(time.Since(started).Milliseconds())
-	response := domain.QueryResponse{QueryID: queryID, Status: status, GeneratedAt: now, ExpiresAt: now.Add(8 * time.Second), Coverage: coverage, Alternatives: []domain.Recommendation{}, Warnings: warnings}
+	response := domain.QueryResponse{QueryID: queryID, Status: status, GeneratedAt: now, ExpiresAt: now.Add(8 * time.Second), RefreshUntil: now.Add(15 * time.Minute), Coverage: coverage, Alternatives: []domain.Recommendation{}, Warnings: warnings}
 	if len(recommendations) > 0 {
 		for i := range recommendations {
 			recommendations[i].Rank = i + 1
@@ -419,11 +430,11 @@ func (s *Service) Showtimes(ctx context.Context, queryID string, q domain.QueryR
 	if err != nil {
 		return domain.ShowtimeQueryResponse{}, fmt.Errorf("discover showtimes: %w", err)
 	}
-	filtered := filterShowtimes(showtimes, q, false)
+	filtered := filterShowtimes(showtimes, q, false, s.now())
 	if len(filtered) > q.CandidateLimit {
 		filtered = filtered[:q.CandidateLimit]
 	}
-	now := time.Now().UTC()
+	now := s.now().UTC()
 	status := "complete"
 	warnings := []string{"Showtime-only queries do not claim per-seat availability; use the seat-query endpoint when live inventory is connected"}
 	if len(filtered) == 0 {
@@ -444,19 +455,19 @@ func (s *Service) Showtimes(ctx context.Context, queryID string, q domain.QueryR
 	}, nil
 }
 
-func filterAndPrune(showtimes []domain.Showtime, q domain.QueryRequest) []domain.Showtime {
-	return filterShowtimes(showtimes, q, true)
+// earliestStart is the first start instant a screening may have: already-started screenings and
+// those inside the minimum start notice are never recommended.
+func earliestStart(now time.Time, q domain.QueryRequest) time.Time {
+	return now.Add(time.Duration(q.MinStartNoticeMinutes) * time.Minute)
 }
 
-func filterShowtimes(showtimes []domain.Showtime, q domain.QueryRequest, requireReservedSeating bool) []domain.Showtime {
+func filterShowtimes(showtimes []domain.Showtime, q domain.QueryRequest, requireReservedSeating bool, now time.Time) []domain.Showtime {
 	formats := toSet(q.Formats)
 	amenities := toSet(q.AmenitiesRequired)
+	notBefore := earliestStart(now, q)
 	result := make([]domain.Showtime, 0, len(showtimes))
 	for _, st := range showtimes {
-		if (requireReservedSeating && !st.ReservedSeating) || st.DistanceMiles > q.MaxDistanceMiles {
-			continue
-		}
-		if q.MinStartNoticeMinutes > 0 && st.StartsAt.Before(time.Now().Add(time.Duration(q.MinStartNoticeMinutes)*time.Minute)) {
+		if (requireReservedSeating && !st.ReservedSeating) || st.DistanceMiles > q.MaxDistanceMiles || !st.StartsAt.After(notBefore) {
 			continue
 		}
 		if len(formats) > 0 && !formats[strings.ToLower(st.Format)] {
@@ -595,11 +606,15 @@ func matchesTime(t time.Time, constraint domain.TimeConstraint) bool {
 		}
 	}
 	clock := t.Format("15:04")
+	inside := clock >= constraint.Start && clock <= constraint.End
+	if constraint.Start > constraint.End {
+		inside = clock >= constraint.Start || clock <= constraint.End
+	}
 	switch constraint.Mode {
 	case "inside":
-		return clock >= constraint.Start && clock <= constraint.End
+		return inside
 	case "outside":
-		return clock < constraint.Start || clock > constraint.End
+		return !inside
 	case "before":
 		return clock <= constraint.End
 	case "after":

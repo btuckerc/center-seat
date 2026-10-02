@@ -53,6 +53,32 @@ type FandangoLocal struct {
 	inventoryCache map[string]cachedFandangoInventory
 	flightMu       sync.Mutex
 	inventoryReads map[string]*fandangoInventoryRead
+	now            func() time.Time
+}
+
+func evictFandangoCache[T any](cache map[string]T, now time.Time, cap int, expires func(T) time.Time) {
+	for key, value := range cache {
+		if !now.Before(expires(value)) {
+			delete(cache, key)
+		}
+	}
+	if len(cache) < cap {
+		return
+	}
+	keys := make([]string, 0, len(cache))
+	for key := range cache {
+		keys = append(keys, key)
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		left, right := expires(cache[keys[i]]), expires(cache[keys[j]])
+		if left.Equal(right) {
+			return keys[i] < keys[j]
+		}
+		return left.Before(right)
+	})
+	for _, key := range keys[:len(cache)-cap+1] {
+		delete(cache, key)
+	}
 }
 
 type fandangoInventoryRead struct {
@@ -112,6 +138,7 @@ func NewFandangoLocal(config FandangoLocalConfig, client *http.Client) (*Fandang
 		discoveryCache: map[string]cachedFandangoShowtimes{},
 		inventoryCache: map[string]cachedFandangoInventory{},
 		inventoryReads: map[string]*fandangoInventoryRead{},
+		now:            time.Now,
 	}, nil
 }
 
@@ -288,7 +315,7 @@ func (f *FandangoLocal) resolveMovie(ctx context.Context, query string) (fandang
 	if normalized == "" {
 		return fandangoMovie{}, errors.New("Fandango movie search requires a title")
 	}
-	now := time.Now()
+	now := f.now()
 	f.cacheMu.RLock()
 	cached, ok := f.movieCache[normalized]
 	f.cacheMu.RUnlock()
@@ -314,6 +341,7 @@ func (f *FandangoLocal) resolveMovie(ctx context.Context, query string) (fandang
 		return fandangoMovie{}, fmt.Errorf("Fandango returned no movie match for %q", query)
 	}
 	f.cacheMu.Lock()
+	evictFandangoCache(f.movieCache, now, 500, func(value cachedFandangoMovie) time.Time { return value.expiresAt })
 	f.movieCache[normalized] = cachedFandangoMovie{movie: best, expiresAt: now.Add(12 * time.Hour)}
 	f.cacheMu.Unlock()
 	f.markSuccess()
@@ -322,8 +350,8 @@ func (f *FandangoLocal) resolveMovie(ctx context.Context, query string) (fandang
 
 func (f *FandangoLocal) discoverDate(ctx context.Context, movie fandangoMovie, date string, query domain.QueryRequest) ([]domain.Showtime, error) {
 	locationKey, parameters := fandangoLocationParameters(query.Location)
-	cacheKey := strings.Join([]string{movie.ID, date, locationKey}, "|")
-	now := time.Now()
+	cacheKey := strings.Join([]string{movie.ID, date, locationKey, query.Time.Timezone}, "|")
+	now := f.now()
 	f.cacheMu.RLock()
 	cached, ok := f.discoveryCache[cacheKey]
 	f.cacheMu.RUnlock()
@@ -340,6 +368,7 @@ func (f *FandangoLocal) discoverDate(ctx context.Context, movie fandangoMovie, d
 	}
 	showtimes := normalizeFandangoShowtimes(response, movie, query)
 	f.cacheMu.Lock()
+	evictFandangoCache(f.discoveryCache, now, 500, func(value cachedFandangoShowtimes) time.Time { return value.expiresAt })
 	f.discoveryCache[cacheKey] = cachedFandangoShowtimes{
 		showtimes: cloneShowtimes(showtimes),
 		expiresAt: now.Add(2 * time.Minute),
@@ -366,7 +395,7 @@ func (f *FandangoLocal) GetAvailability(ctx context.Context, showtime domain.Sho
 	if final {
 		return f.readAvailability(ctx, showtime)
 	}
-	now := time.Now()
+	now := f.now()
 	f.cacheMu.RLock()
 	cached, ok := f.inventoryCache[showtime.SeatLayoutID]
 	f.cacheMu.RUnlock()
@@ -388,7 +417,7 @@ func (f *FandangoLocal) GetAvailability(ctx context.Context, showtime domain.Sho
 }
 
 func (f *FandangoLocal) readAvailability(ctx context.Context, showtime domain.Showtime) (domain.Inventory, error) {
-	now := time.Now()
+	now := f.now()
 	var response json.RawMessage
 	if err := f.getJSON(ctx, "/napi/seatMap/"+showtime.SeatLayoutID, nil, &response); err != nil {
 		return domain.Inventory{}, err
@@ -402,6 +431,7 @@ func (f *FandangoLocal) readAvailability(ctx context.Context, showtime domain.Sh
 		return domain.Inventory{}, err
 	}
 	f.cacheMu.Lock()
+	evictFandangoCache(f.inventoryCache, now, 500, func(value cachedFandangoInventory) time.Time { return value.expiresAt })
 	f.inventoryCache[showtime.SeatLayoutID] = cachedFandangoInventory{
 		inventory: cloneInventory(inventory),
 		expiresAt: now.Add(2 * time.Second),
@@ -768,7 +798,7 @@ func fandangoFilmFormatNames(values []json.RawMessage) []string {
 }
 
 func parseFandangoShowtime(source fandangoShowtime, timezone string) (time.Time, error) {
-	for _, value := range []string{source.DateUTC, source.Date} {
+	for _, value := range []string{source.DateUTC, source.DateLocal, source.Date} {
 		if parsed, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(value)); err == nil {
 			return parsed, nil
 		}
@@ -779,7 +809,7 @@ func parseFandangoShowtime(source fandangoShowtime, timezone string) (time.Time,
 			location = parsed
 		}
 	}
-	for _, layout := range []string{"2006-01-02T15:04:05", "2006-01-02 15:04:05", time.RFC3339Nano} {
+	for _, layout := range []string{"2006-01-02T15:04:05", "2006-01-02 15:04:05"} {
 		if parsed, err := time.ParseInLocation(layout, strings.TrimSpace(source.DateLocal), location); err == nil {
 			return parsed, nil
 		}

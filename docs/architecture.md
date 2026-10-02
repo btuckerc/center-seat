@@ -5,8 +5,8 @@ CenterSeat has two application services:
 - a web app for search and seat-map display;
 - a Go API for discovery, inventory reads, filtering, and ranking.
 
-PostgreSQL and Redis run beside them in Docker Compose. Provider adapters sit
-behind one normalized API.
+Provider adapters sit behind one normalized API; query results are held in
+in-process memory only and are lost on restart.
 
 ## Query path
 
@@ -26,6 +26,15 @@ result is marked partial when a competitive screening could not be checked.
 
 Alternatives are returned without full maps. Opening one refreshes only that
 screening.
+
+Snapshots expire at `expires_at`; results remain available for recommendation
+refreshes until `refresh_until` (15 minutes after generation). Reads after
+snapshot expiry return HTTP 410. The in-memory cache is capped at 1,000 results
+and evicts them at the refresh deadline.
+
+Query times and displayed screening times use the explicit query IANA timezone.
+Provider wall-clock screening times may be interpreted using each venue's
+optional IANA timezone.
 
 ## Ranking
 

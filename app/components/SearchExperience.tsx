@@ -1,8 +1,14 @@
 "use client";
 
-import { FormEvent, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, useEffect, useId, useRef, useState } from "react";
+import { FormEvent, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, useEffect, useEffectEvent, useId, useRef, useState } from "react";
 import {
+  browserTimeZone,
+  buildCheckoutHandoff,
   createDefaultQuery,
+  formatShowtime,
+  handoffText,
+  isValidTimeZone,
+  queryStateToRequest,
   type MovieSuggestion,
   type NormalizedSeatZone,
   type ProviderStatus,
@@ -10,11 +16,11 @@ import {
   type Recommendation,
   type SeatProfile,
   type SeatQueryResponse,
-  type Showtime,
   type ShowtimeQueryResponse,
   type TimeMode,
   type TrendingMovie,
 } from "../lib/api";
+import { queryFromSearchParams, searchParamsFromQuery } from "../lib/share";
 import { SeatMap } from "./SeatMap";
 
 const formatOptions = ["Standard", "Dolby", "IMAX", "XD", "ScreenX", "3D"];
@@ -43,14 +49,17 @@ type SearchExperienceProps = {
   initialTrendingSourceURL?: string;
 };
 type SavedPreferences = Pick<QueryState,
-  "location" | "tickets" | "profile" | "customSeatZone" | "formats" | "maxDistance" |
+  "location" | "timezone" | "tickets" | "profile" | "customSeatZone" | "formats" | "maxDistance" |
   "recliners" | "captions" | "audioDescription" | "wheelchairSpaces" | "companionSeats" |
   "excludeFirstRows" | "allowSplit" | "limitPrice" | "maxPrice"
 >;
 
-const preferencesKey = "centerseat.preferences.v2";
-const legacyPreferencesKey = "centerseat.preferences.v1";
+const preferencesKey = "centerseat.preferences.v3";
+const legacyPreferencesKeys = ["centerseat.preferences.v2", "centerseat.preferences.v1"];
 const postalCodePattern = /^\s*\d{5}(?:-\d{4})?\s*$/;
+// Module-level clock reads: event handlers may consult wall time; render reads the ticking `now` state.
+const currentTime = () => Date.now();
+const isPast = (iso: string) => currentTime() >= new Date(iso).getTime();
 
 function FieldLabel({ children }: { children: React.ReactNode }) {
   return <span className="field-label">{children}</span>;
@@ -162,18 +171,11 @@ function CustomSeatZonePicker({ value, onChange }: { value: NormalizedSeatZone; 
   );
 }
 
-const showtimeLabels = (recommendation: Recommendation) => ({
-  date: new Intl.DateTimeFormat(undefined, { weekday: "short", month: "short", day: "numeric" }).format(new Date(recommendation.showtime.starts_at)),
-  time: new Intl.DateTimeFormat(undefined, { hour: "numeric", minute: "2-digit" }).format(new Date(recommendation.showtime.starts_at)),
-});
-
-const screeningLabels = (showtime: Showtime) => ({
-  date: new Intl.DateTimeFormat(undefined, { weekday: "short", month: "short", day: "numeric" }).format(new Date(showtime.starts_at)),
-  time: new Intl.DateTimeFormat(undefined, { hour: "numeric", minute: "2-digit" }).format(new Date(showtime.starts_at)),
-});
 
 const humanize = (value: string) => value.replaceAll("_", " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
 const normalizeTitle = (value: string) => value.toLocaleLowerCase().replace(/[^a-z0-9]+/g, "").trim();
+
+const timezoneOptions: string[] = typeof Intl.supportedValuesOf === "function" ? Intl.supportedValuesOf("timeZone") : [];
 
 export function SearchExperience({
   initialTrending = [],
@@ -184,6 +186,9 @@ export function SearchExperience({
   const [result, setResult] = useState<SeatQueryResponse | null>(null);
   const [showtimeResult, setShowtimeResult] = useState<ShowtimeQueryResponse | null>(null);
   const [problem, setProblem] = useState<Problem | null>(null);
+  const [shareErrors, setShareErrors] = useState<string[]>([]);
+  const [copyNotice, setCopyNotice] = useState("");
+  const autoRunPending = useRef(false);
   const [providerState, setProviderState] = useState<ProviderState>("checking");
   const [postalLocationSupported, setPostalLocationSupported] = useState(false);
   const [searching, setSearching] = useState(false);
@@ -201,24 +206,24 @@ export function SearchExperience({
   const suggestionsID = useId();
 
   useEffect(() => {
+    // Deferred so hydration finishes before URL/preference state replaces the server defaults.
     const timer = window.setTimeout(() => {
+      const shared = queryFromSearchParams(new URLSearchParams(window.location.search));
+      let saved: Partial<SavedPreferences> = {};
       try {
-        const currentPreferences = window.localStorage.getItem(preferencesKey);
-        const saved = JSON.parse(currentPreferences ?? window.localStorage.getItem(legacyPreferencesKey) ?? "null") as Partial<SavedPreferences> | null;
-        if (!saved) return;
-        setDraft((current) => ({
-          ...current,
-          ...saved,
-          tickets: currentPreferences ? saved.tickets ?? current.tickets : 2,
-          movie: "",
-          movieId: undefined,
-          latitude: undefined,
-          longitude: undefined,
-        }));
+        const raw = window.localStorage.getItem(preferencesKey) ?? legacyPreferencesKeys.map((key) => window.localStorage.getItem(key)).find(Boolean) ?? null;
+        saved = raw ? JSON.parse(raw) as Partial<SavedPreferences> : {};
       } catch {
         window.localStorage.removeItem(preferencesKey);
-        window.localStorage.removeItem(legacyPreferencesKey);
+        for (const key of legacyPreferencesKeys) window.localStorage.removeItem(key);
       }
+      // Precedence: shared link > saved preferences > this browser's zone.
+      const timezone = shared?.query.timezone ?? (isValidTimeZone(saved.timezone) ? saved.timezone : browserTimeZone());
+      const preferences = { ...createDefaultQuery(timezone), ...saved, timezone, movie: "", movieId: undefined, latitude: undefined, longitude: undefined };
+      setDraft({ ...preferences, ...shared?.query, timezone });
+      setShareErrors(shared?.errors ?? []);
+      autoRunPending.current = Boolean(shared?.run);
+      setQueryOpen(Boolean(shared));
     }, 0);
     return () => window.clearTimeout(timer);
   }, []);
@@ -366,6 +371,7 @@ export function SearchExperience({
   const persistPreferences = () => {
     const preferences: SavedPreferences = {
       location: hasPostalLocation ? draft.location.trim() : "",
+      timezone: draft.timezone,
       tickets: draft.tickets,
       profile: draft.profile,
       customSeatZone: draft.customSeatZone,
@@ -384,59 +390,34 @@ export function SearchExperience({
     window.localStorage.setItem(preferencesKey, JSON.stringify(preferences));
   };
 
-  const search = async (event: FormEvent) => {
-    event.preventDefault();
+  const search = async (event?: FormEvent, state: QueryState = draft) => {
+    event?.preventDefault();
+    const stateHasLocation = state.latitude !== undefined && state.longitude !== undefined || postalLocationSupported && postalCodePattern.test(state.location);
     if ((providerState !== "ready" && providerState !== "discovery") || searching) return;
-    if (draft.dateEnd < draft.dateStart) {
+    if (!isValidTimeZone(state.timezone)) {
+      setProblem({ title: "Invalid timezone", detail: "Enter a valid IANA timezone before searching." });
+      return;
+    }
+    if (!state.movie.trim() || !state.location.trim() || !stateHasLocation || !state.formats.length) return;
+    if (state.dateEnd < state.dateStart) {
       setProblem({ title: "Invalid date range", detail: "The end date must be on or after the start date." });
       return;
     }
     setSearching(true);
     setProblem(null);
-    const payload = {
-      movie_query: draft.movie.trim(),
-      ...(draft.movieId ? { movie_id: draft.movieId } : {}),
-      location: {
-        query: draft.location.trim(),
-        ...(draft.latitude !== undefined ? { latitude: draft.latitude } : {}),
-        ...(draft.longitude !== undefined ? { longitude: draft.longitude } : {}),
-        radius_miles: draft.maxDistance,
-      },
-      dates: { start: draft.dateStart, end: draft.dateEnd },
-      time: { mode: draft.timeMode, start: draft.startTime, end: draft.endTime, timezone: Intl.DateTimeFormat().resolvedOptions().timeZone },
-      ticket_count: draft.tickets,
-      seat_profile: draft.profile,
-      ...(draft.profile === "custom" ? { custom_seat_zone: {
-        minimum_x: draft.customSeatZone.minimumX,
-        maximum_x: draft.customSeatZone.maximumX,
-        minimum_y: draft.customSeatZone.minimumY,
-        maximum_y: draft.customSeatZone.maximumY,
-      } } : {}),
-      formats: draft.formats.map((format) => format.toLowerCase()),
-      captions: draft.captions,
-      audio_description: draft.audioDescription,
-      wheelchair_spaces: draft.wheelchairSpaces,
-      companion_seats: draft.companionSeats,
-      amenities_required: draft.recliners ? ["recliner"] : [],
-      max_distance_miles: draft.maxDistance,
-      ...(draft.limitPrice ? { max_total_price: draft.maxPrice } : {}),
-      allow_unknown_price: !draft.limitPrice,
-      exclude_first_rows: draft.excludeFirstRows,
-      allow_split_party: draft.allowSplit,
-      minimum_geometry_confidence: "row_geometry",
-    };
+    const searchState = { ...state };
     try {
       const endpoint = providerState === "ready" ? "/api/seat-queries" : "/api/showtime-queries";
       const response = await fetch(endpoint, {
         method: "POST",
         headers: { "Content-Type": "application/json", "Idempotency-Key": crypto.randomUUID() },
-        body: JSON.stringify(payload),
+        body: JSON.stringify(queryStateToRequest(searchState)),
       });
       const body = await response.json();
       if (!response.ok) {
         setProblem({ title: body.title ?? "Live query failed", detail: body.detail ?? "The live source did not return a usable response.", status: response.status });
       } else {
-        setApplied({ ...draft });
+        setApplied(searchState);
         if (providerState === "ready") {
           setResult(body as SeatQueryResponse);
           setShowtimeResult(null);
@@ -445,12 +426,41 @@ export function SearchExperience({
           setResult(null);
         }
         persistPreferences();
+        const url = new URL(window.location.href);
+        url.search = searchParamsFromQuery(searchState).toString();
+        window.history.replaceState(null, "", url);
         setQueryOpen(false);
       }
     } catch {
       setProblem({ title: "Live query unavailable", detail: "CenterSeat could not reach the configured source. No substitute result was returned." });
     } finally {
       setSearching(false);
+    }
+  };
+
+  const runSharedSearch = useEffectEvent(() => {
+    autoRunPending.current = false;
+    const url = new URL(window.location.href);
+    url.searchParams.delete("run");
+    window.history.replaceState(null, "", url);
+    void search();
+  });
+
+  useEffect(() => {
+    // A `run=1` link runs its read-only search once, after hydration fills `draft` and provider status resolves.
+    if (autoRunPending.current && providerState !== "checking") runSharedSearch();
+  }, [providerState, draft]);
+
+  const copyShareLink = async () => {
+    if (!applied) return;
+    const url = new URL(window.location.href);
+    url.search = searchParamsFromQuery(applied).toString();
+    try {
+      await navigator.clipboard.writeText(url.toString());
+      setCopyNotice("Search link copied.");
+    } catch {
+      window.prompt("Copy this search link", url.toString());
+      setCopyNotice("Copy the link from the dialog.");
     }
   };
 
@@ -532,12 +542,12 @@ export function SearchExperience({
       ) : (
         <section className="result-screen" aria-live="polite">
           <div className="result-titlebar">
-            <div><span>YOUR BEST AVAILABLE</span><h1>{applied?.movie ?? "Live seat search"}</h1><p>{applied ? `${applied.dateStart} — ${applied.dateEnd} · ${applied.tickets} ${applied.tickets === 1 ? "seat" : "seats"} · ${applied.location}` : "The live query did not complete."}</p></div>
-            <div className="result-title-actions"><button onClick={() => setInfoOpen(true)} type="button">What am I seeing?</button><button className="modify-search" onClick={() => openQuery()} type="button">Modify search</button></div>
+            <div><span>YOUR BEST AVAILABLE</span><h1>{applied?.movie ?? "Live seat search"}</h1><p>{applied ? `${applied.dateStart} — ${applied.dateEnd} · ${applied.tickets} ${applied.tickets === 1 ? "seat" : "seats"} · ${applied.location} · ${applied.timezone}` : "The live query did not complete."}</p></div>
+            <div className="result-title-actions">{applied ? <button onClick={copyShareLink} type="button">Copy link</button> : null}<button onClick={() => setInfoOpen(true)} type="button">What am I seeing?</button><button className="modify-search" onClick={() => openQuery()} type="button">Modify search</button>{copyNotice ? <small role="status">{copyNotice}</small> : null}</div>
           </div>
           {problem ? <ProblemPanel problem={problem} onRetry={() => openQuery()} /> : null}
-          {result?.winner ? <LiveResult key={result.query_id} result={result} /> : null}
-          {showtimeResult ? <ShowtimeResults result={showtimeResult} /> : null}
+          {result?.winner && applied ? <LiveResult key={result.query_id} result={result} applied={applied} onRerun={() => void search(undefined, applied)} /> : null}
+          {showtimeResult ? <ShowtimeResults result={showtimeResult} timezone={applied?.timezone ?? draft.timezone} /> : null}
           {result && !result.winner ? <div className="no-match-panel"><span>NO EXACT MATCH</span><h2>No seat satisfied every rule.</h2><p>Nothing was fabricated or silently relaxed.</p><button onClick={() => openQuery()} type="button">Adjust search</button></div> : null}
         </section>
       )}
@@ -608,7 +618,8 @@ export function SearchExperience({
                   {showStartTime ? <label className="field time-bound-field"><FieldLabel>{draft.timeMode === "after" ? "After" : "From"}</FieldLabel><input type="time" value={draft.startTime} onChange={(event) => update("startTime", event.target.value)} /></label> : null}
                   {showEndTime ? <label className="field time-bound-field"><FieldLabel>{draft.timeMode === "before" ? "Before" : "To"}</FieldLabel><input type="time" value={draft.endTime} onChange={(event) => update("endTime", event.target.value)} /></label> : null}
                 </div>
-
+                <label className="field full-span"><FieldLabel>Timezone</FieldLabel><input list="centerseat-timezones" value={draft.timezone} aria-invalid={!isValidTimeZone(draft.timezone)} onChange={(event) => update("timezone", event.target.value)} required /><datalist id="centerseat-timezones">{timezoneOptions.map((timezone) => <option key={timezone} value={timezone} />)}</datalist><span className="field-hint">{isValidTimeZone(draft.timezone) ? "Dates and screening times use this timezone." : "Enter a valid IANA timezone."}</span></label>
+                {shareErrors.length ? <div className="dialog-problem" role="alert"><b>Some shared-link values were ignored</b><span>{shareErrors.join(" · ")}</span></div> : null}
                 <label className="field"><FieldLabel>Party</FieldLabel><select value={draft.tickets} onChange={(event) => update("tickets", Number(event.target.value))}>{Array.from({ length: 8 }, (_, index) => index + 1).map((count) => <option key={count} value={count}>{count} {count === 1 ? "seat" : "seats"}</option>)}</select></label>
                 <label className="field"><FieldLabel>Seat preference</FieldLabel><select value={draft.profile} onChange={(event) => update("profile", event.target.value as SeatProfile)}>{profiles.map((profile) => <option key={profile.value} value={profile.value}>{profile.label} — {profile.hint}</option>)}</select></label>
                 {draft.profile === "custom" ? <CustomSeatZonePicker value={draft.customSeatZone} onChange={(zone) => update("customSeatZone", zone)} /> : null}
@@ -632,7 +643,7 @@ export function SearchExperience({
               </details>
 
               {problem && queryOpen ? <div className="dialog-problem" role="alert"><b>{problem.title}</b><span>{problem.detail}</span></div> : null}
-              <div className="dialog-submit"><p>Live, read-only inventory. No seat hold is created.</p><button disabled={searching || (providerState !== "ready" && providerState !== "discovery") || !draft.movie.trim() || !draft.location.trim() || !locationReady || draft.formats.length === 0} type="submit"><span>{searchText}</span><b>{searching ? <i className="button-spinner" /> : "→"}</b></button></div>
+              <div className="dialog-submit"><p>Live, read-only inventory. No seat hold is created.</p><button disabled={searching || (providerState !== "ready" && providerState !== "discovery") || !draft.movie.trim() || !draft.location.trim() || !locationReady || draft.formats.length === 0 || !isValidTimeZone(draft.timezone)} type="submit"><span>{searchText}</span><b>{searching ? <i className="button-spinner" /> : "→"}</b></button></div>
             </form>
           </div>
         </div>
@@ -651,8 +662,8 @@ function InfoDialog({ onClose }: { onClose: () => void }) {
   return <div className="modal-layer info-layer" onMouseDown={onClose}><div aria-labelledby="info-title" aria-modal="true" className="info-dialog" onMouseDown={(event) => event.stopPropagation()} role="dialog"><div className="dialog-head"><div><span>THE SHORT VERSION</span><h2 id="info-title">How CenterSeat chooses.</h2><p>Expensive live checks happen only after easy exclusions.</p></div><button aria-label="Close explanation" onClick={onClose} type="button">×</button></div><ol className="compact-method"><li><b>1</b><span>Discover<small>Every matching date and showtime</small></span></li><li><b>2</b><span>Filter<small>Time, distance, format, price and access</small></span></li><li><b>3</b><span>Compare live seats<small>Keeps checks moving in parallel and expands automatically across every date</small></span></li><li><b>4</b><span>Prove the winner<small>Stops early only when no remaining screening can score higher</small></span></li><li><b>5</b><span>Recheck<small>The winner gets one final live read</small></span></li></ol><p className="info-note">CenterSeat never creates a cart, hold, or purchase. Availability may change until the theater confirms it.</p></div></div>;
 }
 
-function ShowtimeResults({ result }: { result: ShowtimeQueryResponse }) {
-  return <div className="showtime-workspace"><div className="showtime-notice"><b>Showtimes only</b><span>This source does not expose exact seats.</span></div><div className="showtime-grid">{result.showtimes.map((showtime) => { const labels = screeningLabels(showtime); return <article className="showtime-card" key={showtime.id}><div className="showtime-card-head"><span>{labels.date}</span><b>{labels.time}</b></div><h3>{showtime.venue_name}</h3><p>{humanize(showtime.format)} · {showtime.distance_miles.toFixed(1)} mi</p>{showtime.booking_url ? <a href={showtime.booking_url} target="_blank" rel="noreferrer">Open provider ↗</a> : <small>No booking link returned</small>}</article>; })}</div></div>;
+function ShowtimeResults({ result, timezone }: { result: ShowtimeQueryResponse; timezone: string }) {
+  return <div className="showtime-workspace"><div className="showtime-notice"><b>Showtimes only</b><span>This source does not expose exact seats.</span></div><div className="showtime-grid">{result.showtimes.map((showtime) => { const labels = formatShowtime(showtime.starts_at, timezone); return <article className="showtime-card" key={showtime.id}><div className="showtime-card-head"><span>{labels.date}</span><b>{labels.time} {labels.zone}</b></div><h3>{showtime.venue_name}</h3><p>{humanize(showtime.format)} · {showtime.distance_miles.toFixed(1)} mi</p>{showtime.booking_url ? <a href={showtime.booking_url} target="_blank" rel="noreferrer">Open provider ↗</a> : <small>No booking link returned</small>}</article>; })}</div></div>;
 }
 
 function QueryDiagnostics({ coverage }: { coverage: SeatQueryResponse["coverage"] }) {
@@ -661,60 +672,145 @@ function QueryDiagnostics({ coverage }: { coverage: SeatQueryResponse["coverage"
   return <div className="compact-diagnostics"><span><b>{coverage.inventories_checked}</b> screenings checked</span><span><b>{coverage.inventories_fresh}</b> live maps loaded</span><span><b>{coverage.screenings_unavailable ?? 0}</b> unavailable or no seat match</span><span className={failed ? "has-failure" : ""}><b>{failed}</b> checks interrupted{reasons ? <small>{reasons}</small> : null}</span></div>;
 }
 
-function LiveResult({ result }: { result: SeatQueryResponse }) {
+function LiveResult({ result, applied, onRerun }: { result: SeatQueryResponse; applied: QueryState; onRerun: () => void }) {
   const winner = result.winner as Recommendation;
   const [active, setActive] = useState<Recommendation>(winner);
   const [loadedRecommendations, setLoadedRecommendations] = useState<Record<number, Recommendation>>({ [winner.rank]: winner });
   const [loadingRank, setLoadingRank] = useState<number | null>(null);
   const [mapProblem, setMapProblem] = useState("");
+  const [serverExpired, setServerExpired] = useState(false);
+  // 0 until the first client tick keeps render pure; ages read "0s ago" for that first second.
+  const [now, setNow] = useState(0);
+  const [copyStatus, setCopyStatus] = useState("");
+  const [changedSeats, setChangedSeats] = useState<{ before: string[]; after: string[]; recommendation: Recommendation } | null>(null);
+  const expired = serverExpired || (now > 0 && now >= new Date(result.refresh_until).getTime());
+
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(Date.now()), 1_000);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  const ageSeconds = (recommendation: Recommendation, at = now) => Math.max(0, Math.floor((at - new Date(recommendation.verified_at).getTime()) / 1_000));
+  const pastRefreshWindow = () => isPast(result.refresh_until);
+  const ageLabel = (recommendation: Recommendation) => {
+    const seconds = ageSeconds(recommendation);
+    return seconds < 60 ? `${seconds}s ago` : `${Math.floor(seconds / 60)}m ago`;
+  };
+
+  const refreshRecommendation = async (rank: number) => {
+    const response = await fetch(`/api/seat-recommendations?query_id=${encodeURIComponent(result.query_id)}&rank=${rank}`, { cache: "no-store" });
+    const body = await response.json();
+    if (!response.ok) {
+      if (response.status === 410) setServerExpired(true);
+      throw new Error(`${body.code ? `${body.code}: ` : ""}${body.detail ?? body.title ?? "The selected map could not be refreshed."}`);
+    }
+    return body as Recommendation;
+  };
 
   const openRecommendation = async (recommendation: Recommendation) => {
-    const loaded = loadedRecommendations[recommendation.rank] ?? recommendation;
-    if (loaded.rank === active.rank && loaded.seat_map) return;
-    setMapProblem("");
-    if (loaded.seat_map) {
-      setActive(loaded);
+    if (expired || pastRefreshWindow()) {
+      setServerExpired(true);
       return;
     }
+    const loaded = loadedRecommendations[recommendation.rank] ?? recommendation;
+    const stale = ageSeconds(loaded, currentTime()) > 30 || !loaded.seat_map;
+    if (loaded.rank === active.rank && !stale) return;
+    setMapProblem("");
     setLoadingRank(recommendation.rank);
     try {
-      const response = await fetch(`/api/seat-recommendations?query_id=${encodeURIComponent(result.query_id)}&rank=${recommendation.rank}`, { cache: "no-store" });
-      const body = await response.json();
-      if (!response.ok) throw new Error(body.detail ?? "The selected map could not be refreshed.");
-      const refreshed = body as Recommendation;
+      const refreshed = stale ? await refreshRecommendation(recommendation.rank) : loaded;
       setLoadedRecommendations((current) => ({ ...current, [refreshed.rank]: refreshed }));
       setActive(refreshed);
     } catch (error) {
-      setMapProblem(error instanceof Error ? error.message : "The selected map could not be refreshed.");
+      setMapProblem(error instanceof Error ? error.message : "The selected live seat map could not be refreshed.");
     } finally {
       setLoadingRank(null);
     }
   };
 
+  const continueAtProvider = async () => {
+    const tab = window.open("about:blank", "_blank");
+    if (!tab) {
+      setMapProblem("Allow pop-ups to continue to the provider.");
+      return;
+    }
+    tab.opener = null;
+    if (expired || pastRefreshWindow()) {
+      setServerExpired(true);
+      tab.close();
+      return;
+    }
+    setMapProblem("");
+    setLoadingRank(active.rank);
+    try {
+      const refreshed = await refreshRecommendation(active.rank);
+      setLoadedRecommendations((current) => ({ ...current, [refreshed.rank]: refreshed }));
+      setActive(refreshed);
+      const before = active.seats.map((seat) => seat.label);
+      const after = refreshed.seats.map((seat) => seat.label);
+      if (before.length !== after.length || before.some((label, index) => label !== after[index])) {
+        tab.close();
+        setChangedSeats({ before, after, recommendation: refreshed });
+      } else {
+        const destination = refreshed.booking_url || refreshed.showtime.booking_url;
+        if (destination) tab.location.href = destination;
+        else {
+          tab.close();
+          setMapProblem("No provider booking URL was returned.");
+        }
+      }
+    } catch (error) {
+      tab.close();
+      setMapProblem(error instanceof Error ? error.message : "The provider handoff could not be refreshed.");
+    } finally {
+      setLoadingRank(null);
+    }
+  };
+
+  const copyHandoff = async (json: boolean) => {
+    const shareURL = new URL("/", window.location.origin);
+    shareURL.search = searchParamsFromQuery(applied).toString();
+    const handoff = buildCheckoutHandoff(active, applied.tickets, applied.timezone, shareURL.toString());
+    const text = json ? JSON.stringify(handoff, null, 2) : handoffText(handoff);
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopyStatus(json ? "Agent JSON copied." : "Checkout details copied.");
+    } catch {
+      window.prompt(json ? "Copy agent JSON" : "Copy checkout details", text);
+      setCopyStatus("Copy the text from the dialog.");
+    }
+  };
+
   const options = active.seat_options?.length ? active.seat_options : active.seats;
   const labels = options.map((seat) => seat.label);
-  const showtime = showtimeLabels(active);
+  const showtime = formatShowtime(active.showtime.starts_at, applied.timezone);
   const availableCount = active.seat_map?.seats.filter((seat) => seat.status === "available").length ?? 0;
-  const activeIsFinal = active.rank !== 1 || result.coverage.winner_verified;
   const recommendationChoices = [winner, ...result.alternatives].map((recommendation) => loadedRecommendations[recommendation.rank] ?? recommendation);
+  const handoff = buildCheckoutHandoff(active, applied.tickets, applied.timezone);
+  const bookingURL = active.booking_url || active.showtime.booking_url;
 
   return <div className="result-workspace">
     <section className="seat-focus">
-      <div className="seat-focus-head"><div><span>{active.rank === 1 ? (result.coverage.range_best_proven ? "BEST ACROSS RANGE" : "BEST FOUND") : `ALTERNATIVE ${active.rank}`} · {activeIsFinal ? "FINAL CHECK" : "INITIAL CHECK"} · {active.profile_match === "closest_fallback" ? "CLOSEST FALLBACK" : "PREFERRED ZONE"}</span><h2>{labels.join(" · ")}</h2><p>{active.showtime.venue_name}{active.showtime.auditorium_name ? ` · ${active.showtime.auditorium_name}` : ""}</p></div><div className="match-score"><b>{active.score}</b><small>/100 match</small></div></div>
+      <div className="seat-focus-head"><div><span>{active.rank === 1 ? (result.coverage.range_best_proven ? "BEST ACROSS RANGE" : "BEST FOUND") : `ALTERNATIVE ${active.rank}`} · {ageSeconds(active) <= 30 ? "LIVE CHECKED" : "CHECK AGED"} · {active.profile_match === "closest_fallback" ? "CLOSEST FALLBACK" : "PREFERRED ZONE"}</span><h2>{labels.join(" · ")}</h2><p>{active.showtime.venue_name}{active.showtime.auditorium_name ? ` · ${active.showtime.auditorium_name}` : ""}</p></div><div className="match-score"><b>{active.score}</b><small>/100 match</small></div></div>
       <div className="seat-map-wrap"><SeatMap recommendation={active} /></div>
     </section>
 
     <aside className="result-rail">
-      <div className="result-facts"><span><small>WHEN</small><b>{showtime.time}</b><em>{showtime.date}</em></span><span><small>FORMAT</small><b>{humanize(active.showtime.format)}</b><em>{active.showtime.distance_miles.toFixed(1)} mi away</em></span><span><small>LIVE MAP</small><b>{availableCount} open</b><em>{activeIsFinal ? "Reverified" : "Refresh incomplete"}</em></span></div>
-      {active.booking_url ? <a className="booking-link" href={active.booking_url} target="_blank" rel="noreferrer">Continue at provider <span>↗</span></a> : <div className="booking-unavailable">No provider booking link returned.</div>}
+      <div className="result-facts"><span><small>WHEN</small><b>{showtime.time} {showtime.zone}</b><em>{showtime.date}</em></span><span><small>FORMAT</small><b>{humanize(active.showtime.format)}</b><em>{active.showtime.distance_miles.toFixed(1)} mi away</em></span><span><small>LIVE MAP</small><b>{availableCount} open</b><em>checked {ageLabel(active)}</em></span></div>
+      {expired ? <div className="rail-warning" role="status">This live result has expired. Refresh is no longer available.</div> : null}
+      <button className="booking-link" disabled={loadingRank !== null || expired || !bookingURL} onClick={continueAtProvider} type="button">Continue at provider <span>↗</span></button>
+      {expired ? <button className="modify-search" onClick={onRerun} type="button">Re-run search</button> : null}
+
+      <section className="handoff-panel"><h3>Checkout handoff</h3><p><b>{handoff.seats.join(" · ")}</b> · {handoff.ticket_count} {handoff.ticket_count === 1 ? "ticket" : "tickets"}</p><p>{handoff.venue}{handoff.auditorium ? ` · ${handoff.auditorium}` : ""}</p><p>{showtime.date} · {showtime.time} {showtime.zone} · checked {ageLabel(active)}</p><div><button onClick={() => void copyHandoff(false)} type="button">Copy for checkout</button><button onClick={() => void copyHandoff(true)} type="button">Copy agent JSON</button></div>{copyStatus ? <small role="status">{copyStatus}</small> : null}</section>
+      {changedSeats ? <div className="rail-warning" role="alert"><b>Seats changed after the live check</b><p>{changedSeats.before.join(" · ")} → {changedSeats.after.join(" · ")}</p><button onClick={() => { const tab = window.open(changedSeats.recommendation.booking_url || changedSeats.recommendation.showtime.booking_url || "", "_blank"); if (tab) tab.opener = null; }} type="button">Continue with these seats</button></div> : null}
 
       <div className="alternative-list">
         <div className="rail-section-title"><span>COMPARE LIVE OPTIONS</span><small>Return to the best match or open another map</small></div>
         {recommendationChoices.map((recommendation) => {
           const recommendationLabels = (recommendation.seat_options?.length ? recommendation.seat_options : recommendation.seats).map((seat) => seat.label);
-          const time = showtimeLabels(recommendation);
+          const time = formatShowtime(recommendation.showtime.starts_at, applied.timezone);
           const selected = active.rank === recommendation.rank;
-          return <button aria-label={`${recommendation.rank === 1 ? "Best match" : `Option ${recommendation.rank}`}: ${recommendationLabels.join(", ")}`} aria-pressed={selected} className={`${selected ? "selected" : ""}${recommendation.rank === 1 ? " best-choice" : ""}`} disabled={loadingRank !== null} key={recommendation.showtime.id} onClick={() => openRecommendation(recommendation)} type="button"><span><em>{recommendation.rank === 1 ? "BEST MATCH" : `OPTION ${recommendation.rank}`}</em><b>{recommendationLabels.join(" · ")}</b><small>{recommendation.showtime.venue_name}</small></span><span><b>{loadingRank === recommendation.rank ? "…" : recommendation.score}</b><small>{time.time}</small></span></button>;
+          return <button aria-label={`${recommendation.rank === 1 ? "Best match" : `Option ${recommendation.rank}`}: ${recommendationLabels.join(", ")}`} aria-pressed={selected} className={`${selected ? "selected" : ""}${recommendation.rank === 1 ? " best-choice" : ""}`} disabled={loadingRank !== null || expired} key={recommendation.showtime.id} onClick={() => openRecommendation(recommendation)} type="button"><span><em>{recommendation.rank === 1 ? "BEST MATCH" : `OPTION ${recommendation.rank}`}</em><b>{recommendationLabels.join(" · ")}</b><small>{recommendation.showtime.venue_name}</small></span><span><b>{loadingRank === recommendation.rank ? "…" : recommendation.score}</b><small>{time.time} {time.zone} · checked {ageLabel(recommendation)}</small></span></button>;
         })}
       </div>
 

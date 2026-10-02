@@ -2,11 +2,14 @@ package httpapi
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -15,85 +18,197 @@ import (
 	"centerseat/backend/internal/testfixtures"
 )
 
-func TestCreateQueryIsIdempotentAndCacheable(t *testing.T) {
+func newTestServer() *Server {
 	provider := testfixtures.Provider{}
-	server := New(service.New(provider, provider, 3), slog.New(slog.NewTextHandler(io.Discard, nil)))
-	today := time.Now().Format(time.DateOnly)
-	payload, _ := json.Marshal(domain.QueryRequest{
+	return New(service.New(provider, provider, 3), slog.New(slog.NewTextHandler(io.Discard, nil)))
+}
+
+// queryPayload targets tomorrow so fixture screenings are never excluded as already started.
+func queryPayload(mutate func(*domain.QueryRequest)) []byte {
+	tomorrow := time.Now().AddDate(0, 0, 1).Format(time.DateOnly)
+	request := domain.QueryRequest{
 		MovieQuery: "Test Film", Location: domain.LocationConstraint{Query: "Charlotte", Latitude: 35.2271, Longitude: -80.8431, RadiusMiles: 25},
-		Dates: domain.DateConstraint{Start: today, End: today}, TicketCount: 1, SeatProfile: "balanced", CandidateLimit: 10, MaxDistanceMiles: 25,
-	})
-	post := func() *httptest.ResponseRecorder {
-		req := httptest.NewRequest(http.MethodPost, "/v1/seat-queries", bytes.NewReader(payload))
-		req.Header.Set("Idempotency-Key", "test-key-123")
-		rec := httptest.NewRecorder()
-		server.Handler().ServeHTTP(rec, req)
-		return rec
+		Dates: domain.DateConstraint{Start: tomorrow, End: tomorrow}, TicketCount: 1, SeatProfile: "balanced", CandidateLimit: 10, MaxDistanceMiles: 25,
+		Time: domain.TimeConstraint{Timezone: "America/New_York"},
 	}
-	first, second := post(), post()
-	if first.Code != http.StatusOK {
-		t.Fatalf("first status %d: %s", first.Code, first.Body.String())
+	if mutate != nil {
+		mutate(&request)
 	}
-	if second.Code != http.StatusOK {
-		t.Fatalf("second status %d", second.Code)
+	payload, _ := json.Marshal(request)
+	return payload
+}
+
+func serve(server *Server, method, path string, body []byte, headers map[string]string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(method, path, bytes.NewReader(body))
+	for name, value := range headers {
+		req.Header.Set(name, value)
 	}
-	if first.Body.String() != second.Body.String() {
-		t.Fatal("idempotent response changed")
-	}
-	etag := first.Header().Get("ETag")
-	if etag == "" {
-		t.Fatal("missing ETag")
-	}
-	var response domain.QueryResponse
-	if err := json.Unmarshal(first.Body.Bytes(), &response); err != nil {
-		t.Fatal(err)
-	}
-	get := httptest.NewRequest(http.MethodGet, "/v1/seat-queries/"+response.QueryID, nil)
-	get.Header.Set("If-None-Match", etag)
 	rec := httptest.NewRecorder()
-	server.Handler().ServeHTTP(rec, get)
-	if rec.Code != http.StatusNotModified {
-		t.Fatalf("expected 304, got %d", rec.Code)
+	server.Handler().ServeHTTP(rec, req)
+	return rec
+}
+
+func expectProblem(t *testing.T, rec *httptest.ResponseRecorder, status int, code string) {
+	t.Helper()
+	var problem struct {
+		Code string `json:"code"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &problem)
+	if rec.Code != status || problem.Code != code {
+		t.Fatalf("expected %d %s, got %d: %s", status, code, rec.Code, rec.Body.String())
 	}
 }
 
-func TestCreateQueryAcceptsCustomNormalizedSeatZone(t *testing.T) {
-	provider := testfixtures.Provider{}
-	server := New(service.New(provider, provider, 3), slog.New(slog.NewTextHandler(io.Discard, nil)))
-	today := time.Now().Format(time.DateOnly)
-	zone := domain.SeatZone{MinimumX: .15, MaximumX: .85, MinimumY: .2, MaximumY: .9}
-	payload, _ := json.Marshal(domain.QueryRequest{
-		MovieQuery: "Test Film", Location: domain.LocationConstraint{Query: "Charlotte", RadiusMiles: 25},
-		Dates: domain.DateConstraint{Start: today, End: today}, TicketCount: 1,
-		SeatProfile: "custom", CustomSeatZone: &zone, CandidateLimit: 10, MaxDistanceMiles: 25,
-	})
-	req := httptest.NewRequest(http.MethodPost, "/v1/seat-queries", bytes.NewReader(payload))
-	rec := httptest.NewRecorder()
-	server.Handler().ServeHTTP(rec, req)
+func decodeQuery(t *testing.T, rec *httptest.ResponseRecorder) domain.QueryResponse {
+	t.Helper()
 	if rec.Code != http.StatusOK {
-		t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
+		t.Fatalf("query status %d: %s", rec.Code, rec.Body.String())
 	}
 	var response domain.QueryResponse
 	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
 		t.Fatal(err)
 	}
+	return response
+}
+
+func TestCreateQueryIsIdempotentAndCacheable(t *testing.T) {
+	server := newTestServer()
+	payload := queryPayload(nil)
+	key := map[string]string{"Idempotency-Key": "test-key-123"}
+	first, second := serve(server, http.MethodPost, "/v1/seat-queries", payload, key), serve(server, http.MethodPost, "/v1/seat-queries", payload, key)
+	response := decodeQuery(t, first)
+	if second.Code != http.StatusOK || first.Body.String() != second.Body.String() {
+		t.Fatalf("idempotent replay changed: %d", second.Code)
+	}
+	if !response.RefreshUntil.After(response.ExpiresAt) {
+		t.Fatalf("refresh_until %s must outlast expires_at %s", response.RefreshUntil, response.ExpiresAt)
+	}
+	etag := first.Header().Get("ETag")
+	rec := serve(server, http.MethodGet, "/v1/seat-queries/"+response.QueryID, nil, map[string]string{"If-None-Match": etag})
+	if etag == "" || rec.Code != http.StatusNotModified {
+		t.Fatalf("expected 304 for etag %q, got %d", etag, rec.Code)
+	}
+}
+
+func TestIdempotencyKeyReusedWithDifferentBodyConflicts(t *testing.T) {
+	server := newTestServer()
+	key := map[string]string{"Idempotency-Key": "conflict-key-1"}
+	decodeQuery(t, serve(server, http.MethodPost, "/v1/seat-queries", queryPayload(nil), key))
+	other := queryPayload(func(q *domain.QueryRequest) { q.TicketCount = 2 })
+	expectProblem(t, serve(server, http.MethodPost, "/v1/seat-queries", other, key), http.StatusConflict, "idempotency_conflict")
+}
+
+func TestExpiredSnapshotIsGoneButRanksRefreshUntilRetentionEnds(t *testing.T) {
+	server := newTestServer()
+	key := map[string]string{"Idempotency-Key": "expiry-key-1"}
+	first := serve(server, http.MethodPost, "/v1/seat-queries", queryPayload(nil), key)
+	response := decodeQuery(t, first)
+
+	server.now = func() time.Time { return response.ExpiresAt }
+	// A stale snapshot must not be revalidated into a 304.
+	stale := serve(server, http.MethodGet, "/v1/seat-queries/"+response.QueryID, nil, map[string]string{"If-None-Match": first.Header().Get("ETag")})
+	expectProblem(t, stale, http.StatusGone, "query_expired")
+	expectProblem(t, serve(server, http.MethodPost, "/v1/seat-queries", queryPayload(nil), key), http.StatusGone, "idempotency_key_expired")
+	rank := serve(server, http.MethodGet, "/v1/seat-queries/"+response.QueryID+"/recommendations/1", nil, nil)
+	if rank.Code != http.StatusOK {
+		t.Fatalf("rank refresh inside retention: %d %s", rank.Code, rank.Body.String())
+	}
+
+	server.now = func() time.Time { return response.RefreshUntil }
+	expectProblem(t, serve(server, http.MethodGet, "/v1/seat-queries/"+response.QueryID+"/recommendations/1", nil, nil), http.StatusGone, "query_expired")
+
+	// Any later write evicts the retained entry; the ID and key are then unknown and the key is reusable.
+	decodeQuery(t, serve(server, http.MethodPost, "/v1/seat-queries", queryPayload(nil), key))
+	expectProblem(t, serve(server, http.MethodGet, "/v1/seat-queries/"+response.QueryID, nil, nil), http.StatusNotFound, "not_found")
+}
+
+func TestValidationFailuresCarryCode(t *testing.T) {
+	server := newTestServer()
+	missingZone := queryPayload(func(q *domain.QueryRequest) { q.Time.Timezone = "" })
+	expectProblem(t, serve(server, http.MethodPost, "/v1/seat-queries", missingZone, nil), http.StatusUnprocessableEntity, "validation_failed")
+	expectProblem(t, serve(server, http.MethodPost, "/v1/seat-queries", []byte("{"), nil), http.StatusBadRequest, "invalid_request")
+}
+
+// gatedDiscovery blocks Discover until released and counts upstream calls.
+type gatedDiscovery struct {
+	testfixtures.Provider
+	calls   *atomic.Int32
+	release chan struct{}
+}
+
+func (g gatedDiscovery) Discover(ctx context.Context, q domain.QueryRequest) ([]domain.Showtime, error) {
+	g.calls.Add(1)
+	<-g.release
+	return g.Provider.Discover(ctx, q)
+}
+
+func TestConcurrentRequestsWithSameKeyQueryProvidersOnce(t *testing.T) {
+	provider := testfixtures.Provider{}
+	discovery := gatedDiscovery{Provider: provider, calls: &atomic.Int32{}, release: make(chan struct{})}
+	server := New(service.New(discovery, provider, 3), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	payload := queryPayload(nil)
+	key := map[string]string{"Idempotency-Key": "coalesce-key-1"}
+
+	const duplicates = 4
+	responses := make([]*httptest.ResponseRecorder, duplicates)
+	var wg sync.WaitGroup
+	for i := range duplicates {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			responses[i] = serve(server, http.MethodPost, "/v1/seat-queries", payload, key)
+		}()
+	}
+	// Let every duplicate reach the in-flight wait before the first evaluation finishes.
+	deadline := time.Now().Add(2 * time.Second)
+	for discovery.calls.Load() == 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	time.Sleep(20 * time.Millisecond)
+	close(discovery.release)
+	wg.Wait()
+
+	if calls := discovery.calls.Load(); calls != 1 {
+		t.Fatalf("expected one upstream discovery, got %d", calls)
+	}
+	for _, rec := range responses[1:] {
+		if rec.Code != http.StatusOK || rec.Body.String() != responses[0].Body.String() {
+			t.Fatalf("duplicate did not replay the first result: %d", rec.Code)
+		}
+	}
+}
+
+func TestResultCacheIsBounded(t *testing.T) {
+	server := newTestServer()
+	base := time.Now()
+	for i := range maxCachedResults + 5 {
+		server.store(newID("qry"), "", cachedResult{retainUntil: base.Add(time.Hour + time.Duration(i)*time.Second)})
+	}
+	server.store("qry_newest", "seat:newest-key", cachedResult{retainUntil: base.Add(2 * time.Hour)})
+	if len(server.results) != maxCachedResults {
+		t.Fatalf("cache holds %d entries, cap is %d", len(server.results), maxCachedResults)
+	}
+	if server.byKey["seat:newest-key"] != "qry_newest" {
+		t.Fatal("newest entry was evicted instead of the oldest")
+	}
+}
+
+func TestCreateQueryAcceptsCustomNormalizedSeatZone(t *testing.T) {
+	server := newTestServer()
+	zone := domain.SeatZone{MinimumX: .15, MaximumX: .85, MinimumY: .2, MaximumY: .9}
+	payload := queryPayload(func(q *domain.QueryRequest) {
+		q.Location = domain.LocationConstraint{Query: "Charlotte", RadiusMiles: 25}
+		q.SeatProfile, q.CustomSeatZone = "custom", &zone
+	})
+	response := decodeQuery(t, serve(server, http.MethodPost, "/v1/seat-queries", payload, nil))
 	if response.Winner.SeatMap == nil || response.Winner.SeatMap.PreferredZone == nil {
 		t.Fatalf("expected custom zone in the recommendation map, got %#v", response.Winner)
 	}
 }
 
 func TestCreateShowtimeQueryReturnsDiscoveryResults(t *testing.T) {
-	provider := testfixtures.Provider{}
-	server := New(service.New(provider, provider, 3), slog.New(slog.NewTextHandler(io.Discard, nil)))
-	today := time.Now().Format(time.DateOnly)
-	payload, _ := json.Marshal(domain.QueryRequest{
-		MovieQuery: "Test Film", Location: domain.LocationConstraint{Query: "Charlotte", Latitude: 35.2271, Longitude: -80.8431, RadiusMiles: 25},
-		Dates: domain.DateConstraint{Start: today, End: today}, TicketCount: 1, SeatProfile: "balanced", CandidateLimit: 10, MaxDistanceMiles: 25,
-	})
-	req := httptest.NewRequest(http.MethodPost, "/v1/showtime-queries", bytes.NewReader(payload))
-	req.Header.Set("Idempotency-Key", "showtime-key-123")
-	rec := httptest.NewRecorder()
-	server.Handler().ServeHTTP(rec, req)
+	server := newTestServer()
+	rec := serve(server, http.MethodPost, "/v1/showtime-queries", queryPayload(nil), map[string]string{"Idempotency-Key": "showtime-key-123"})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
 	}
@@ -107,39 +222,22 @@ func TestCreateShowtimeQueryReturnsDiscoveryResults(t *testing.T) {
 }
 
 func TestMovieSuggestionsAndAlternativeMapsAreReadOnDemand(t *testing.T) {
-	provider := testfixtures.Provider{}
-	server := New(service.New(provider, provider, 3), slog.New(slog.NewTextHandler(io.Discard, nil)))
-
-	suggest := httptest.NewRequest(http.MethodGet, "/v1/movie-suggestions?q=Test&limit=6", nil)
-	suggestResponse := httptest.NewRecorder()
-	server.Handler().ServeHTTP(suggestResponse, suggest)
+	server := newTestServer()
+	suggestResponse := serve(server, http.MethodGet, "/v1/movie-suggestions?q=Test&limit=6", nil, nil)
 	if suggestResponse.Code != http.StatusOK || suggestResponse.Header().Get("ETag") == "" {
 		t.Fatalf("suggestions status %d: %s", suggestResponse.Code, suggestResponse.Body.String())
 	}
 
-	today := time.Now().Format(time.DateOnly)
-	payload, _ := json.Marshal(domain.QueryRequest{
-		MovieQuery: "Test Film", MovieID: "movie-1",
-		Location: domain.LocationConstraint{Query: "28202", RadiusMiles: 25},
-		Dates:    domain.DateConstraint{Start: today, End: today}, TicketCount: 1,
-		SeatProfile: "dead_center", CandidateLimit: 10, MaxDistanceMiles: 25,
+	payload := queryPayload(func(q *domain.QueryRequest) {
+		q.MovieID = "movie-1"
+		q.Location = domain.LocationConstraint{Query: "28202", RadiusMiles: 25}
+		q.SeatProfile = "dead_center"
 	})
-	post := httptest.NewRequest(http.MethodPost, "/v1/seat-queries", bytes.NewReader(payload))
-	postResponse := httptest.NewRecorder()
-	server.Handler().ServeHTTP(postResponse, post)
-	if postResponse.Code != http.StatusOK {
-		t.Fatalf("query status %d: %s", postResponse.Code, postResponse.Body.String())
-	}
-	var query domain.QueryResponse
-	if err := json.Unmarshal(postResponse.Body.Bytes(), &query); err != nil {
-		t.Fatal(err)
-	}
+	query := decodeQuery(t, serve(server, http.MethodPost, "/v1/seat-queries", payload, nil))
 	if len(query.Alternatives) == 0 || query.Alternatives[0].SeatMap != nil {
 		t.Fatalf("expected compact alternatives without eager maps, got %#v", query.Alternatives)
 	}
-	detail := httptest.NewRequest(http.MethodGet, "/v1/seat-queries/"+query.QueryID+"/recommendations/2", nil)
-	detailResponse := httptest.NewRecorder()
-	server.Handler().ServeHTTP(detailResponse, detail)
+	detailResponse := serve(server, http.MethodGet, "/v1/seat-queries/"+query.QueryID+"/recommendations/2", nil, nil)
 	if detailResponse.Code != http.StatusOK {
 		t.Fatalf("detail status %d: %s", detailResponse.Code, detailResponse.Body.String())
 	}

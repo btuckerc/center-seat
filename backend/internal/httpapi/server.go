@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -20,13 +21,26 @@ import (
 	"centerseat/backend/internal/service"
 )
 
+// Retention policy: `expires` is snapshot freshness (GET and idempotent replay return 410 after it);
+// `retainUntil` is how long ranks stay refreshable. Entries are evicted at retainUntil and the cache
+// never exceeds maxCachedResults.
+const maxCachedResults = 1000
+
 type cachedResult struct {
+	bodyHash    string
+	body        []byte
+	etag        string
+	key         string
+	expires     time.Time
+	retainUntil time.Time
+	request     *domain.QueryRequest
+	response    *domain.QueryResponse
+}
+
+// keyFlight marks an Idempotency-Key whose query is still running; concurrent duplicates wait on done.
+type keyFlight struct {
 	bodyHash string
-	body     []byte
-	etag     string
-	expires  time.Time
-	request  *domain.QueryRequest
-	response *domain.QueryResponse
+	done     chan struct{}
 }
 
 type Server struct {
@@ -36,6 +50,8 @@ type Server struct {
 	mu         sync.RWMutex
 	results    map[string]cachedResult
 	byKey      map[string]string
+	flights    map[string]*keyFlight
+	now        func() time.Time
 	requests   atomic.Uint64
 	errors     atomic.Uint64
 	durationMS atomic.Uint64
@@ -45,7 +61,7 @@ func New(svc *service.Service, logger *slog.Logger) *Server {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	s := &Server{service: svc, logger: logger, mux: http.NewServeMux(), results: map[string]cachedResult{}, byKey: map[string]string{}}
+	s := &Server{service: svc, logger: logger, mux: http.NewServeMux(), results: map[string]cachedResult{}, byKey: map[string]string{}, flights: map[string]*keyFlight{}, now: time.Now}
 	s.routes()
 	return s
 }
@@ -113,21 +129,21 @@ func (s *Server) providers(w http.ResponseWriter, _ *http.Request) {
 func (s *Server) movieSuggestions(w http.ResponseWriter, r *http.Request) {
 	query := strings.TrimSpace(r.URL.Query().Get("q"))
 	if len(query) < 2 || len(query) > 160 {
-		s.problem(w, r, http.StatusBadRequest, "Invalid movie query", "q must be between 2 and 160 characters")
+		s.problem(w, r, http.StatusBadRequest, "invalid_request", "Invalid movie query", "q must be between 2 and 160 characters")
 		return
 	}
 	limit := 6
 	if raw := strings.TrimSpace(r.URL.Query().Get("limit")); raw != "" {
 		parsed, err := strconv.Atoi(raw)
 		if err != nil || parsed < 1 || parsed > 10 {
-			s.problem(w, r, http.StatusBadRequest, "Invalid suggestion limit", "limit must be between 1 and 10")
+			s.problem(w, r, http.StatusBadRequest, "invalid_request", "Invalid suggestion limit", "limit must be between 1 and 10")
 			return
 		}
 		limit = parsed
 	}
 	suggestions, err := s.service.MovieSuggestions(r.Context(), query, limit)
 	if err != nil {
-		s.problem(w, r, http.StatusServiceUnavailable, "Movie suggestions failed", err.Error())
+		s.problem(w, r, http.StatusServiceUnavailable, "provider_unavailable", "Movie suggestions failed", err.Error())
 		return
 	}
 	serveETagJSON(w, r, map[string]any{"suggestions": suggestions}, 300)
@@ -140,54 +156,146 @@ func (s *Server) metrics(w http.ResponseWriter, _ *http.Request) {
 	_, _ = fmt.Fprintf(w, "# TYPE centerseat_http_request_duration_milliseconds_total counter\ncenterseat_http_request_duration_milliseconds_total %d\n", s.durationMS.Load())
 }
 
-func (s *Server) createQuery(w http.ResponseWriter, r *http.Request) {
+// decodeQuery reads and validates a query body; on failure it has already written the problem response.
+func (s *Server) decodeQuery(w http.ResponseWriter, r *http.Request, scope string) (request domain.QueryRequest, bodyHash, key string, ok bool) {
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 1<<20))
 	if err != nil {
-		s.problem(w, r, http.StatusBadRequest, "Invalid request body", err.Error())
-		return
+		s.problem(w, r, http.StatusBadRequest, "invalid_request", "Invalid request body", err.Error())
+		return request, "", "", false
 	}
-	var request domain.QueryRequest
 	decoder := json.NewDecoder(strings.NewReader(string(body)))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&request); err != nil {
-		s.problem(w, r, http.StatusBadRequest, "Invalid JSON", err.Error())
-		return
+		s.problem(w, r, http.StatusBadRequest, "invalid_request", "Invalid JSON", err.Error())
+		return request, "", "", false
 	}
 	request.SetDefaults()
 	if err := request.Validate(); err != nil {
-		s.problem(w, r, http.StatusUnprocessableEntity, "Query validation failed", err.Error())
-		return
+		s.problem(w, r, http.StatusUnprocessableEntity, "validation_failed", "Query validation failed", err.Error())
+		return request, "", "", false
 	}
 	canonical, _ := json.Marshal(request)
 	hash := sha256.Sum256(canonical)
-	bodyHash := hex.EncodeToString(hash[:])
 	rawKey := strings.TrimSpace(r.Header.Get("Idempotency-Key"))
 	if rawKey != "" && (len(rawKey) < 8 || len(rawKey) > 128) {
-		s.problem(w, r, http.StatusBadRequest, "Invalid Idempotency-Key", "Idempotency-Key must be 8 to 128 characters")
-		return
+		s.problem(w, r, http.StatusBadRequest, "invalid_request", "Invalid Idempotency-Key", "Idempotency-Key must be 8 to 128 characters")
+		return request, "", "", false
 	}
-	key := ""
 	if rawKey != "" {
-		key = "seat:" + rawKey
+		key = scope + ":" + rawKey
 	}
-	if key != "" {
-		s.mu.RLock()
-		queryID, found := s.byKey[key]
-		cached, cachedFound := s.results[queryID]
-		s.mu.RUnlock()
-		if found && cachedFound {
-			if cached.bodyHash != bodyHash {
-				s.problem(w, r, http.StatusConflict, "Idempotency conflict", "This key was already used with a different request body")
-				return
+	return request, hex.EncodeToString(hash[:]), key, true
+}
+
+// replayOrClaim answers a repeated Idempotency-Key from cache (or rejects it), or makes the caller the
+// single evaluator for that key. handled=true means the response was written. A non-nil flight must be
+// released after the result is stored so waiting duplicates replay it instead of querying providers again.
+func (s *Server) replayOrClaim(w http.ResponseWriter, r *http.Request, key, bodyHash string) (flight *keyFlight, handled bool) {
+	if key == "" {
+		return nil, false
+	}
+	for {
+		s.mu.Lock()
+		now := s.now()
+		s.evictLocked(now)
+		if queryID, found := s.byKey[key]; found {
+			cached := s.results[queryID]
+			s.mu.Unlock()
+			switch {
+			case cached.bodyHash != bodyHash:
+				s.problem(w, r, http.StatusConflict, "idempotency_conflict", "Idempotency conflict", "This key was already used with a different request body")
+			case !now.Before(cached.expires):
+				s.problem(w, r, http.StatusGone, "idempotency_key_expired", "Idempotency key expired", "The original query snapshot has expired; send a new key to run the query again")
+			default:
+				serveCached(w, cached, now)
 			}
-			serveCached(w, cached)
-			return
+			return nil, true
+		}
+		running, waiting := s.flights[key]
+		if !waiting {
+			flight = &keyFlight{bodyHash: bodyHash, done: make(chan struct{})}
+			s.flights[key] = flight
+			s.mu.Unlock()
+			return flight, false
+		}
+		s.mu.Unlock()
+		if running.bodyHash != bodyHash {
+			s.problem(w, r, http.StatusConflict, "idempotency_conflict", "Idempotency conflict", "This key is in use with a different request body")
+			return nil, true
+		}
+		select {
+		case <-running.done:
+			// Loop: replay the stored result, or claim the key if the first evaluation failed.
+		case <-r.Context().Done():
+			return nil, true
 		}
 	}
+}
+
+func (s *Server) release(key string, flight *keyFlight) {
+	if flight == nil {
+		return
+	}
+	s.mu.Lock()
+	delete(s.flights, key)
+	s.mu.Unlock()
+	close(flight.done)
+}
+
+func (s *Server) store(queryID, key string, cached cachedResult) {
+	cached.key = key
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.evictLocked(s.now())
+	for len(s.results) >= maxCachedResults {
+		oldestID := ""
+		for id, candidate := range s.results {
+			if oldestID == "" || candidate.retainUntil.Before(s.results[oldestID].retainUntil) {
+				oldestID = id
+			}
+		}
+		s.dropLocked(oldestID)
+	}
+	s.results[queryID] = cached
+	if key != "" {
+		s.byKey[key] = queryID
+	}
+}
+
+func (s *Server) evictLocked(now time.Time) {
+	for id, cached := range s.results {
+		if !now.Before(cached.retainUntil) {
+			s.dropLocked(id)
+		}
+	}
+}
+
+func (s *Server) dropLocked(queryID string) {
+	if key := s.results[queryID].key; key != "" {
+		delete(s.byKey, key)
+	}
+	delete(s.results, queryID)
+}
+
+func newCachedResult(bodyHash string, encoded []byte, expires, retainUntil time.Time) cachedResult {
+	etagHash := sha256.Sum256(encoded)
+	return cachedResult{bodyHash: bodyHash, body: encoded, etag: `"` + hex.EncodeToString(etagHash[:12]) + `"`, expires: expires, retainUntil: retainUntil}
+}
+
+func (s *Server) createQuery(w http.ResponseWriter, r *http.Request) {
+	request, bodyHash, key, ok := s.decodeQuery(w, r, "seat")
+	if !ok {
+		return
+	}
+	flight, handled := s.replayOrClaim(w, r, key, bodyHash)
+	if handled {
+		return
+	}
+	defer s.release(key, flight)
 	queryID := newID("qry")
 	response, err := s.service.Query(r.Context(), queryID, request)
 	if err != nil {
-		s.problem(w, r, http.StatusServiceUnavailable, "Seat query failed", err.Error())
+		s.problem(w, r, http.StatusServiceUnavailable, "provider_unavailable", "Seat query failed", err.Error())
 		return
 	}
 	s.logger.Info("seat query evaluated",
@@ -196,6 +304,7 @@ func (s *Server) createQuery(w http.ResponseWriter, r *http.Request) {
 		"movie_id", request.MovieID,
 		"date_start", request.Dates.Start,
 		"date_end", request.Dates.End,
+		"timezone", request.Time.Timezone,
 		"seat_profile", request.SeatProfile,
 		"ticket_count", request.TicketCount,
 		"time_mode", request.Time.Mode,
@@ -217,92 +326,48 @@ func (s *Server) createQuery(w http.ResponseWriter, r *http.Request) {
 		"verification_ms", response.Coverage.VerificationMS,
 	)
 	encoded, _ := json.Marshal(response)
-	etagHash := sha256.Sum256(encoded)
-	requestCopy := request
-	responseCopy := response
-	cached := cachedResult{bodyHash: bodyHash, body: encoded, etag: `"` + hex.EncodeToString(etagHash[:12]) + `"`, expires: response.ExpiresAt, request: &requestCopy, response: &responseCopy}
-	s.mu.Lock()
-	s.results[queryID] = cached
-	if key != "" {
-		s.byKey[key] = queryID
-	}
-	s.mu.Unlock()
-	serveCached(w, cached)
+	cached := newCachedResult(bodyHash, encoded, response.ExpiresAt, response.RefreshUntil)
+	cached.request, cached.response = &request, &response
+	s.store(queryID, key, cached)
+	serveCached(w, cached, s.now())
 }
 
 func (s *Server) createShowtimeQuery(w http.ResponseWriter, r *http.Request) {
-	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 1<<20))
-	if err != nil {
-		s.problem(w, r, http.StatusBadRequest, "Invalid request body", err.Error())
+	request, bodyHash, key, ok := s.decodeQuery(w, r, "showtime")
+	if !ok {
 		return
 	}
-	var request domain.QueryRequest
-	decoder := json.NewDecoder(strings.NewReader(string(body)))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&request); err != nil {
-		s.problem(w, r, http.StatusBadRequest, "Invalid JSON", err.Error())
+	flight, handled := s.replayOrClaim(w, r, key, bodyHash)
+	if handled {
 		return
 	}
-	request.SetDefaults()
-	if err := request.Validate(); err != nil {
-		s.problem(w, r, http.StatusUnprocessableEntity, "Query validation failed", err.Error())
-		return
-	}
-	canonical, _ := json.Marshal(request)
-	hash := sha256.Sum256(canonical)
-	bodyHash := hex.EncodeToString(hash[:])
-	rawKey := strings.TrimSpace(r.Header.Get("Idempotency-Key"))
-	if rawKey != "" && (len(rawKey) < 8 || len(rawKey) > 128) {
-		s.problem(w, r, http.StatusBadRequest, "Invalid Idempotency-Key", "Idempotency-Key must be 8 to 128 characters")
-		return
-	}
-	key := ""
-	if rawKey != "" {
-		key = "showtime:" + rawKey
-	}
-	if key != "" {
-		s.mu.RLock()
-		queryID, found := s.byKey[key]
-		cached, cachedFound := s.results[queryID]
-		s.mu.RUnlock()
-		if found && cachedFound {
-			if cached.bodyHash != bodyHash {
-				s.problem(w, r, http.StatusConflict, "Idempotency conflict", "This key was already used with a different request body")
-				return
-			}
-			serveCached(w, cached)
-			return
-		}
-	}
+	defer s.release(key, flight)
 	queryID := newID("stq")
 	response, err := s.service.Showtimes(r.Context(), queryID, request)
 	if err != nil {
-		s.problem(w, r, http.StatusServiceUnavailable, "Showtime query failed", err.Error())
+		s.problem(w, r, http.StatusServiceUnavailable, "provider_unavailable", "Showtime query failed", err.Error())
 		return
 	}
 	encoded, _ := json.Marshal(response)
-	etagHash := sha256.Sum256(encoded)
-	cached := cachedResult{bodyHash: bodyHash, body: encoded, etag: `"` + hex.EncodeToString(etagHash[:12]) + `"`, expires: response.ExpiresAt}
-	s.mu.Lock()
-	s.results[queryID] = cached
-	if key != "" {
-		s.byKey[key] = queryID
-	}
-	s.mu.Unlock()
-	serveCached(w, cached)
+	// Showtime results have no refreshable ranks; keep them only long enough for idempotent replay.
+	cached := newCachedResult(bodyHash, encoded, response.ExpiresAt, response.ExpiresAt)
+	s.store(queryID, key, cached)
+	serveCached(w, cached, s.now())
 }
 
 func (s *Server) getQuery(w http.ResponseWriter, r *http.Request) {
 	queryID := r.PathValue("query_id")
-	if !strings.HasPrefix(queryID, "qry_") {
-		s.problem(w, r, http.StatusNotFound, "Query not found", "The query ID is unknown or has expired")
-		return
-	}
 	s.mu.RLock()
 	cached, ok := s.results[queryID]
 	s.mu.RUnlock()
-	if !ok {
-		s.problem(w, r, http.StatusNotFound, "Query not found", "The query ID is unknown or has expired")
+	now := s.now()
+	if !strings.HasPrefix(queryID, "qry_") || !ok || !now.Before(cached.retainUntil) {
+		s.problem(w, r, http.StatusNotFound, "not_found", "Query not found", "The query ID is unknown or has been evicted")
+		return
+	}
+	// Expiry is checked before conditional handling: a stale snapshot never earns a 304.
+	if !now.Before(cached.expires) {
+		s.problem(w, r, http.StatusGone, "query_expired", "Query expired", "The result snapshot has expired; refresh a rank or run the query again")
 		return
 	}
 	if r.Header.Get("If-None-Match") == cached.etag {
@@ -310,21 +375,25 @@ func (s *Server) getQuery(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotModified)
 		return
 	}
-	serveCached(w, cached)
+	serveCached(w, cached, now)
 }
 
 func (s *Server) getRecommendation(w http.ResponseWriter, r *http.Request) {
 	queryID := r.PathValue("query_id")
 	rank, err := strconv.Atoi(r.PathValue("rank"))
 	if !strings.HasPrefix(queryID, "qry_") || err != nil || rank < 1 || rank > 5 {
-		s.problem(w, r, http.StatusNotFound, "Recommendation not found", "The query or recommendation rank is unknown")
+		s.problem(w, r, http.StatusNotFound, "not_found", "Recommendation not found", "The query or recommendation rank is unknown")
 		return
 	}
 	s.mu.RLock()
 	cached, ok := s.results[queryID]
 	s.mu.RUnlock()
 	if !ok || cached.request == nil || cached.response == nil {
-		s.problem(w, r, http.StatusNotFound, "Recommendation not found", "The query is unknown or has expired")
+		s.problem(w, r, http.StatusNotFound, "not_found", "Recommendation not found", "The query is unknown")
+		return
+	}
+	if !s.now().Before(cached.retainUntil) {
+		s.problem(w, r, http.StatusGone, "query_expired", "Query expired", "Recommendation refresh retention has expired; run the query again")
 		return
 	}
 	var source *domain.Recommendation
@@ -341,21 +410,30 @@ func (s *Server) getRecommendation(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if source == nil {
-		s.problem(w, r, http.StatusNotFound, "Recommendation not found", "The requested rank was not part of this query")
+		s.problem(w, r, http.StatusNotFound, "not_found", "Recommendation not found", "The requested rank was not part of this query")
 		return
 	}
 	refreshCtx, cancel := context.WithTimeout(r.Context(), 4*time.Second)
 	defer cancel()
 	refreshed, err := s.service.RefreshRecommendation(refreshCtx, *source, *cached.request)
 	if err != nil {
-		s.problem(w, r, http.StatusServiceUnavailable, "Recommendation refresh failed", err.Error())
+		switch {
+		case errors.Is(err, service.ErrScreeningStarted):
+			s.problem(w, r, http.StatusConflict, "screening_started", "Screening started", err.Error())
+		case errors.Is(err, service.ErrSeatsUnavailable):
+			s.problem(w, r, http.StatusConflict, "seats_unavailable", "Seats unavailable", err.Error())
+		case errors.Is(err, service.ErrPriceExceeded):
+			s.problem(w, r, http.StatusConflict, "price_exceeded", "Price exceeded", err.Error())
+		default:
+			s.problem(w, r, http.StatusServiceUnavailable, "provider_unavailable", "Provider unavailable", err.Error())
+		}
 		return
 	}
 	serveETagJSON(w, r, refreshed, 0)
 }
 
-func serveCached(w http.ResponseWriter, cached cachedResult) {
-	maxAge := int(time.Until(cached.expires).Seconds())
+func serveCached(w http.ResponseWriter, cached cachedResult, now time.Time) {
+	maxAge := int(cached.expires.Sub(now).Seconds())
 	if maxAge < 0 {
 		maxAge = 0
 	}
@@ -382,10 +460,11 @@ func serveETagJSON(w http.ResponseWriter, r *http.Request, value any, maxAge int
 	_, _ = w.Write(encoded)
 }
 
-func (s *Server) problem(w http.ResponseWriter, r *http.Request, status int, title, detail string) {
+// problem writes an RFC 9457 body; `code` is the stable machine-readable reason clients branch on.
+func (s *Server) problem(w http.ResponseWriter, r *http.Request, status int, code, title, detail string) {
 	s.errors.Add(1)
 	w.Header().Set("Content-Type", "application/problem+json")
-	writeJSON(w, status, map[string]any{"type": "about:blank", "title": title, "status": status, "detail": detail, "instance": r.URL.Path})
+	writeJSON(w, status, map[string]any{"type": "about:blank", "title": title, "status": status, "code": code, "detail": detail, "instance": r.URL.Path})
 }
 
 func writeJSON(w http.ResponseWriter, status int, value any) {

@@ -8,10 +8,10 @@ import (
 func TestQueryAllowsProviderSupportedCoarseLocation(t *testing.T) {
 	today := time.Now().Format(time.DateOnly)
 	query := QueryRequest{
-		MovieQuery:  "Test Film",
-		Location:    LocationConstraint{Query: "28202", RadiusMiles: 25},
-		Dates:       DateConstraint{Start: today, End: today},
-		TicketCount: 1, SeatProfile: "dead_center", MaxDistanceMiles: 25, CandidateLimit: 6,
+		MovieQuery: "Test Film",
+		Location:   LocationConstraint{Query: "28202", RadiusMiles: 25},
+		Dates:      DateConstraint{Start: today, End: today},
+		Time:       TimeConstraint{Mode: "any", Timezone: "America/New_York"},
 	}
 	query.SetDefaults()
 	if err := query.Validate(); err != nil {
@@ -20,11 +20,10 @@ func TestQueryAllowsProviderSupportedCoarseLocation(t *testing.T) {
 }
 
 func TestQueryStillRequiresSomeLocationSignal(t *testing.T) {
-	today := time.Now().Format(time.DateOnly)
 	query := QueryRequest{
 		MovieQuery:  "Test Film",
 		Location:    LocationConstraint{RadiusMiles: 25},
-		Dates:       DateConstraint{Start: today, End: today},
+		Time:        TimeConstraint{Mode: "any", Timezone: "America/New_York"},
 		TicketCount: 1, SeatProfile: "dead_center", MaxDistanceMiles: 25, CandidateLimit: 6,
 	}
 	query.SetDefaults()
@@ -50,8 +49,8 @@ func TestQueryUsesTheFullAutomaticCandidateSafetyCeiling(t *testing.T) {
 func TestCustomSeatProfileRequiresValidNormalizedZone(t *testing.T) {
 	base := QueryRequest{
 		MovieQuery: "Test Film", Location: LocationConstraint{Query: "28202", RadiusMiles: 25},
-		Dates: DateConstraint{Start: "2026-08-01", End: "2026-08-01"}, TicketCount: 1,
-		SeatProfile: "custom", MaxDistanceMiles: 25, CandidateLimit: 10,
+		Dates: DateConstraint{Start: "2026-08-01", End: "2026-08-01"}, TicketCount: 1, SeatProfile: "custom", MaxDistanceMiles: 25,
+		Time: TimeConstraint{Mode: "any", Timezone: "America/New_York"},
 	}
 	base.SetDefaults()
 	if err := base.Validate(); err == nil {
@@ -68,5 +67,31 @@ func TestCustomSeatProfileRequiresValidNormalizedZone(t *testing.T) {
 	valid.CustomSeatZone = &SeatZone{MinimumX: .2, MaximumX: .8, MinimumY: .4, MaximumY: .75}
 	if err := valid.Validate(); err != nil {
 		t.Fatalf("expected normalized custom zone to pass: %v", err)
+	}
+}
+func TestQueryRequiresTimezoneAndValidClockTimes(t *testing.T) {
+	query := QueryRequest{
+		MovieQuery: "Film", Location: LocationConstraint{Query: "28202", RadiusMiles: 25},
+		Dates:       DateConstraint{Start: "2026-08-01", End: "2026-08-01"},
+		TicketCount: 1, SeatProfile: "balanced", MaxDistanceMiles: 25, CandidateLimit: 10,
+		Time: TimeConstraint{Mode: "any"},
+	}
+	query.SetDefaults()
+	for _, test := range []struct {
+		name string
+		set  func(*QueryRequest)
+	}{
+		{"missing timezone", func(q *QueryRequest) { q.Time.Timezone = "" }},
+		{"invalid timezone", func(q *QueryRequest) { q.Time.Timezone = "Not/AZone" }},
+		{"non-padded time", func(q *QueryRequest) { q.Time.Start = "7pm" }},
+		{"out-of-range time", func(q *QueryRequest) { q.Time.End = "25:00" }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			candidate := query
+			test.set(&candidate)
+			if err := candidate.Validate(); err == nil {
+				t.Fatal("expected validation error")
+			}
+		})
 	}
 }

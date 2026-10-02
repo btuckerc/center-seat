@@ -13,6 +13,68 @@ import (
 	"centerseat/backend/internal/testfixtures"
 )
 
+func pinBeforeFixtureShowtimes(svc *Service, date, timezone string) {
+	location, err := time.LoadLocation(timezone)
+	if err != nil {
+		panic(err)
+	}
+	day, err := time.ParseInLocation(time.DateOnly, date, location)
+	if err != nil {
+		panic(err)
+	}
+	svc.now = func() time.Time { return day.Add(-time.Hour) }
+}
+
+func TestOvernightTimeWindowUsesRequestedTimezone(t *testing.T) {
+	location, err := time.LoadLocation("America/New_York")
+	if err != nil {
+		t.Fatal(err)
+	}
+	window := domain.TimeConstraint{Start: "22:00", End: "02:00", Timezone: "America/New_York"}
+	for _, test := range []struct {
+		hour, minute int
+		want         bool
+	}{{23, 30, true}, {1, 0, true}, {12, 0, false}} {
+		at := time.Date(2026, time.August, 1, test.hour, test.minute, 0, 0, location)
+		window.Mode = "inside"
+		if got := matchesTime(at, window); got != test.want {
+			t.Errorf("inside at %s = %v, want %v", at, got, test.want)
+		}
+		window.Mode = "outside"
+		if got := matchesTime(at, window); got == test.want {
+			t.Errorf("outside at %s = %v, want %v", at, got, !test.want)
+		}
+	}
+}
+
+func TestQueryExcludesStartedAndNoticeWindowShowtimes(t *testing.T) {
+	now := time.Date(2026, time.August, 1, 12, 0, 0, 0, time.UTC)
+	q := domain.QueryRequest{MaxDistanceMiles: 25, MinStartNoticeMinutes: 30,
+		Time: domain.TimeConstraint{Mode: "any", Timezone: "America/New_York"}}
+	showtimes := []domain.Showtime{
+		{ID: "started", StartsAt: now.Add(-time.Minute), DistanceMiles: 1},
+		{ID: "notice", StartsAt: now.Add(20 * time.Minute), DistanceMiles: 1},
+		{ID: "later", StartsAt: now.Add(31 * time.Minute), DistanceMiles: 1},
+	}
+	filtered := filterShowtimes(showtimes, q, false, now)
+	if len(filtered) != 1 || filtered[0].ID != "later" {
+		t.Fatalf("unexpected filtered showtimes: %#v", filtered)
+	}
+}
+
+func TestRefreshRecommendationRejectsStartedScreening(t *testing.T) {
+	provider := testfixtures.Provider{}
+	svc := New(provider, provider, 1)
+	startsAt := time.Date(2026, time.August, 1, 18, 0, 0, 0, time.UTC)
+	svc.now = func() time.Time { return startsAt.Add(time.Minute) }
+	_, err := svc.RefreshRecommendation(context.Background(), domain.Recommendation{
+		Showtime: domain.Showtime{StartsAt: startsAt},
+	}, domain.QueryRequest{Time: domain.TimeConstraint{Timezone: "America/New_York"}})
+	if !errors.Is(err, ErrScreeningStarted) {
+		t.Fatalf("expected ErrScreeningStarted, got %v", err)
+	}
+}
+
 func TestQueryReturnsVerifiedWinnerAndAlternatives(t *testing.T) {
 	provider := testfixtures.Provider{}
 	svc := New(provider, provider, 4)
@@ -22,6 +84,7 @@ func TestQueryReturnsVerifiedWinnerAndAlternatives(t *testing.T) {
 		Dates: domain.DateConstraint{Start: today, End: today}, TicketCount: 2, SeatProfile: "balanced",
 		MaxDistanceMiles: 25, CandidateLimit: 12, Time: domain.TimeConstraint{Mode: "inside", Start: "17:00", End: "22:00", Timezone: "America/New_York"},
 	}
+	pinBeforeFixtureShowtimes(svc, today, "America/New_York")
 	result, err := svc.Query(context.Background(), "qry_test", q)
 	if err != nil {
 		t.Fatal(err)
@@ -50,8 +113,9 @@ func TestOutsideTimeWindow(t *testing.T) {
 	q := domain.QueryRequest{
 		MovieQuery: "Film", Location: domain.LocationConstraint{Query: "28202", Latitude: 35.2271, Longitude: -80.8431, RadiusMiles: 25},
 		Dates: domain.DateConstraint{Start: today, End: today}, TicketCount: 1, SeatProfile: "balanced", CandidateLimit: 12,
-		MaxDistanceMiles: 25, Time: domain.TimeConstraint{Mode: "outside", Start: "17:00", End: "21:00"},
+		MaxDistanceMiles: 25, Time: domain.TimeConstraint{Mode: "outside", Start: "17:00", End: "21:00", Timezone: "America/New_York"},
 	}
+	pinBeforeFixtureShowtimes(svc, today, "America/New_York")
 	result, err := svc.Query(context.Background(), "qry_test", q)
 	if err != nil {
 		t.Fatal(err)
@@ -73,7 +137,9 @@ func TestShowtimesReturnsDiscoveryWithoutClaimingSeatInventory(t *testing.T) {
 		MovieQuery: "The Test Film", Location: domain.LocationConstraint{Query: "Charlotte", Latitude: 35.2271, Longitude: -80.8431, RadiusMiles: 25},
 		Dates: domain.DateConstraint{Start: today, End: today}, TicketCount: 1, SeatProfile: "balanced",
 		MaxDistanceMiles: 25, CandidateLimit: 12,
+		Time: domain.TimeConstraint{Mode: "any", Timezone: "America/New_York"},
 	}
+	pinBeforeFixtureShowtimes(svc, today, "America/New_York")
 	result, err := svc.Showtimes(context.Background(), "stq_test", q)
 	if err != nil {
 		t.Fatal(err)
@@ -120,6 +186,7 @@ func TestQuerySeparatesMapFailuresFromValidExclusions(t *testing.T) {
 	}
 	today := time.Now().Format(time.DateOnly)
 	maximum := 50.0
+	pinBeforeFixtureShowtimes(svc, today, "America/New_York")
 	result, err := svc.Query(context.Background(), "qry_diagnostics", domain.QueryRequest{
 		MovieQuery: "The Test Film",
 		Location: domain.LocationConstraint{
@@ -128,6 +195,7 @@ func TestQuerySeparatesMapFailuresFromValidExclusions(t *testing.T) {
 		Dates: domain.DateConstraint{Start: today, End: today}, TicketCount: 1,
 		SeatProfile: "balanced", MaxDistanceMiles: 25, CandidateLimit: 12,
 		MaxTotalPrice: &maximum, AllowUnknownPrice: true,
+		Time: domain.TimeConstraint{Mode: "any", Timezone: "America/New_York"},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -151,6 +219,7 @@ func TestQueryTreatsProviderNotAvailableAsAConclusiveExclusion(t *testing.T) {
 	discovery := testfixtures.Provider{}
 	svc := New(discovery, goneInventory{base: discovery}, 6)
 	today := time.Now().Format(time.DateOnly)
+	pinBeforeFixtureShowtimes(svc, today, "America/New_York")
 	result, err := svc.Query(context.Background(), "qry_gone", domain.QueryRequest{
 		MovieQuery: "The Test Film",
 		Location: domain.LocationConstraint{
@@ -158,6 +227,7 @@ func TestQueryTreatsProviderNotAvailableAsAConclusiveExclusion(t *testing.T) {
 		},
 		Dates: domain.DateConstraint{Start: today, End: today}, TicketCount: 1,
 		SeatProfile: "balanced", MaxDistanceMiles: 25, CandidateLimit: 12,
+		Time: domain.TimeConstraint{Mode: "any", Timezone: "America/New_York"},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -174,6 +244,7 @@ func TestQueryPromotesNextCandidateWhenWinnerChangesDuringVerification(t *testin
 	discovery := testfixtures.Provider{}
 	svc := New(discovery, promotionInventory{base: discovery}, 4)
 	today := time.Now().Format(time.DateOnly)
+	pinBeforeFixtureShowtimes(svc, today, "America/New_York")
 	result, err := svc.Query(context.Background(), "qry_promote", domain.QueryRequest{
 		MovieQuery: "The Test Film",
 		Location: domain.LocationConstraint{
@@ -181,6 +252,7 @@ func TestQueryPromotesNextCandidateWhenWinnerChangesDuringVerification(t *testin
 		},
 		Dates: domain.DateConstraint{Start: today, End: today}, TicketCount: 1,
 		SeatProfile: "balanced", MaxDistanceMiles: 25, CandidateLimit: 12,
+		Time: domain.TimeConstraint{Mode: "any", Timezone: "America/New_York"},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -199,7 +271,9 @@ func TestQueryPromotesNextCandidateWhenWinnerChangesDuringVerification(t *testin
 func TestQueryStopsAfterAutomaticInitialCoverageWhenResultIsStrong(t *testing.T) {
 	provider := &adaptiveTestProvider{}
 	svc := New(provider, provider, 8)
-	result, err := svc.Query(context.Background(), "qry_adaptive_fast", adaptiveTestQuery())
+	query := adaptiveTestQuery()
+	pinBeforeFixtureShowtimes(svc, query.Dates.Start, query.Time.Timezone)
+	result, err := svc.Query(context.Background(), "qry_adaptive_fast", query)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -220,7 +294,9 @@ func TestQueryStopsAfterAutomaticInitialCoverageWhenResultIsStrong(t *testing.T)
 func TestQueryExpandsAfterStaleCandidatesAndKeepsTheRangeClaimHonest(t *testing.T) {
 	provider := &adaptiveTestProvider{failInitialBatch: true}
 	svc := New(provider, provider, 8)
-	result, err := svc.Query(context.Background(), "qry_adaptive_expand", adaptiveTestQuery())
+	query := adaptiveTestQuery()
+	pinBeforeFixtureShowtimes(svc, query.Dates.Start, query.Time.Timezone)
+	result, err := svc.Query(context.Background(), "qry_adaptive_expand", query)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -238,7 +314,9 @@ func TestQueryExpandsAfterStaleCandidatesAndKeepsTheRangeClaimHonest(t *testing.
 func TestQueryDoesNotStopAtAnArbitraryHighScore(t *testing.T) {
 	provider := &adaptiveTestProvider{allCompetitive: true}
 	svc := New(provider, provider, 8)
-	result, err := svc.Query(context.Background(), "qry_adaptive_proof", adaptiveTestQuery())
+	query := adaptiveTestQuery()
+	pinBeforeFixtureShowtimes(svc, query.Dates.Start, query.Time.Timezone)
+	result, err := svc.Query(context.Background(), "qry_adaptive_proof", query)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -254,6 +332,7 @@ func TestQueryCoversEveryDateBeforeStoppingEarly(t *testing.T) {
 	provider := &adaptiveTestProvider{days: 3}
 	svc := New(provider, provider, 8)
 	query := adaptiveTestQuery()
+	pinBeforeFixtureShowtimes(svc, query.Dates.Start, query.Time.Timezone)
 	start, err := time.Parse(time.DateOnly, query.Dates.Start)
 	if err != nil {
 		t.Fatal(err)
@@ -362,6 +441,7 @@ func adaptiveTestQuery() domain.QueryRequest {
 		Location:   domain.LocationConstraint{Query: "28202", Latitude: 35.2271, Longitude: -80.8431, RadiusMiles: 25},
 		Dates:      domain.DateConstraint{Start: today, End: today}, TicketCount: 1,
 		SeatProfile: "dead_center", MaxDistanceMiles: 25, CandidateLimit: 18,
+		Time: domain.TimeConstraint{Mode: "any", Timezone: "America/New_York"},
 	}
 }
 

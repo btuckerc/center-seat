@@ -75,6 +75,10 @@ paths:
                 $ref: "#/components/schemas/ShowtimeQueryResponse"
         "400":
           $ref: "#/components/responses/Problem"
+        "409":
+          $ref: "#/components/responses/Problem"
+        "410":
+          $ref: "#/components/responses/Problem"
         "422":
           $ref: "#/components/responses/Problem"
         "503":
@@ -104,6 +108,10 @@ paths:
               schema:
                 $ref: "#/components/schemas/SeatQueryResponse"
         "400":
+          $ref: "#/components/responses/Problem"
+        "409":
+          $ref: "#/components/responses/Problem"
+        "410":
           $ref: "#/components/responses/Problem"
         "422":
           $ref: "#/components/responses/Problem"
@@ -141,6 +149,8 @@ paths:
           description: The client already has the current representation
         "404":
           $ref: "#/components/responses/Problem"
+        "410":
+          $ref: "#/components/responses/Problem"
   /v1/seat-queries/{query_id}/recommendations/{rank}:
     get:
       operationId: getSeatRecommendation
@@ -166,6 +176,10 @@ paths:
               schema:
                 $ref: "#/components/schemas/Recommendation"
         "404":
+          $ref: "#/components/responses/Problem"
+        "409":
+          $ref: "#/components/responses/Problem"
+        "410":
           $ref: "#/components/responses/Problem"
         "503":
           $ref: "#/components/responses/Problem"
@@ -213,7 +227,7 @@ components:
       name: Idempotency-Key
       in: header
       required: false
-      description: Reuses the first result for the same key and request body.
+      description: Requests with the same key and body coalesce while in flight; later replays reuse the first result.
       schema:
         type: string
         minLength: 8
@@ -238,12 +252,7 @@ components:
     SeatQueryRequest:
       type: object
       additionalProperties: false
-      required:
-        - movie_query
-        - location
-        - dates
-        - ticket_count
-        - seat_profile
+      required: [movie_query, location, dates, ticket_count, seat_profile, time]
       properties:
         movie_query:
           type: string
@@ -314,7 +323,8 @@ components:
           type: integer
           minimum: 0
           maximum: 1440
-          default: 30
+          default: 0
+          description: Screenings starting within this many minutes are excluded. Screenings that have already started are always excluded.
         allow_split_party:
           type: boolean
           default: false
@@ -371,23 +381,29 @@ components:
     TimeConstraint:
       type: object
       additionalProperties: false
+      required: [timezone]
+      description: Times use the required IANA query timezone.
       properties:
         mode:
           type: string
           enum: [any, inside, outside, before, after]
           default: any
+          description: For inside and outside, if start is later than end, the interval wraps past midnight; outside is its complement.
         start:
           type: string
           pattern: "^([01]\\d|2[0-3]):[0-5]\\d$"
+          description: Optional local time in HH:MM.
         end:
           type: string
           pattern: "^([01]\\d|2[0-3]):[0-5]\\d$"
+          description: Optional local time in HH:MM.
         timezone:
           type: string
+          description: Required IANA time zone used to interpret query times and display screening times.
           examples: [America/New_York]
     SeatQueryResponse:
       type: object
-      required: [query_id, status, generated_at, expires_at, coverage, winner, alternatives]
+      required: [query_id, status, generated_at, expires_at, refresh_until, coverage, winner, alternatives]
       properties:
         query_id:
           type: string
@@ -400,6 +416,11 @@ components:
         expires_at:
           type: string
           format: date-time
+          description: Snapshot expiry for reading this result; distinct from the 15-minute refresh retention deadline.
+        refresh_until:
+          type: string
+          format: date-time
+          description: Retention deadline for refreshing recommendations; later requests return 410.
         coverage:
           $ref: "#/components/schemas/Coverage"
         winner:
@@ -410,6 +431,31 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/Recommendation"
+        warnings:
+          type: array
+          items:
+            type: string
+    ShowtimeQueryResponse:
+      type: object
+      required: [query_id, status, generated_at, expires_at, coverage, showtimes]
+      properties:
+        query_id:
+          type: string
+        status:
+          type: string
+          enum: [complete, no_match]
+        generated_at:
+          type: string
+          format: date-time
+        expires_at:
+          type: string
+          format: date-time
+        coverage:
+          $ref: "#/components/schemas/Coverage"
+        showtimes:
+          type: array
+          items:
+            $ref: "#/components/schemas/Showtime"
         warnings:
           type: array
           items:
@@ -514,14 +560,13 @@ components:
           type: string
         distance_miles:
           type: number
+        venue_timezone:
+          type: string
+          description: Optional IANA venue time zone used to interpret provider wall-clock screening times.
         total_price:
           type: number
         currency:
           type: string
-        amenities:
-          type: array
-          items:
-            type: string
     Seat:
       type: object
       required: [id, label, row, x, y, type, status]
@@ -713,7 +758,7 @@ components:
           type: string
     Problem:
       type: object
-      required: [type, title, status, detail]
+      required: [type, title, status, detail, code]
       properties:
         type:
           type: string
@@ -724,6 +769,10 @@ components:
           type: integer
         detail:
           type: string
+        code:
+          type: string
+          enum: [validation_failed, invalid_request, not_found, query_expired, idempotency_key_expired, idempotency_conflict, screening_started, seats_unavailable, price_exceeded, provider_unavailable]
+          description: Stable machine-readable error code.
         instance:
           type: string
           format: uri-reference

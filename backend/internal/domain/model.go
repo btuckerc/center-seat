@@ -148,6 +148,19 @@ func (q QueryRequest) Validate() error {
 	if !validTimeModes[q.Time.Mode] {
 		return fmt.Errorf("unsupported time.mode %q", q.Time.Mode)
 	}
+	if strings.TrimSpace(q.Time.Timezone) == "" {
+		return errors.New("time.timezone is required")
+	}
+	if _, err := time.LoadLocation(q.Time.Timezone); err != nil {
+		return errors.New("time.timezone must be a valid IANA timezone")
+	}
+	for _, field := range [...]struct{ name, value string }{{"time.start", q.Time.Start}, {"time.end", q.Time.End}} {
+		if field.value != "" {
+			if _, err := time.Parse("15:04", field.value); err != nil {
+				return fmt.Errorf("%s must be HH:MM", field.name)
+			}
+		}
+	}
 	if q.Time.Mode != "any" {
 		if q.Time.Start == "" && q.Time.Mode != "before" {
 			return errors.New("time.start is required for this time mode")
@@ -183,6 +196,7 @@ type Showtime struct {
 	ID                string    `json:"id"`
 	MovieTitle        string    `json:"movie_title"`
 	VenueName         string    `json:"venue_name"`
+	VenueTimezone     string    `json:"venue_timezone,omitempty"`
 	AuditoriumName    string    `json:"auditorium_name,omitempty"`
 	StartsAt          time.Time `json:"starts_at"`
 	Format            string    `json:"format"`
@@ -283,6 +297,7 @@ type QueryResponse struct {
 	Status       string           `json:"status"`
 	GeneratedAt  time.Time        `json:"generated_at"`
 	ExpiresAt    time.Time        `json:"expires_at"`
+	RefreshUntil time.Time        `json:"refresh_until"`
 	Coverage     Coverage         `json:"coverage"`
 	Winner       *Recommendation  `json:"winner"`
 	Alternatives []Recommendation `json:"alternatives"`

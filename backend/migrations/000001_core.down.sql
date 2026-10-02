@@ -1,6 +1,0 @@
-DROP TABLE IF EXISTS seat_queries;
-DROP TABLE IF EXISTS source_observations;
-DROP TABLE IF EXISTS showtimes;
-DROP TABLE IF EXISTS auditoria;
-DROP TABLE IF EXISTS venues;
-DROP TABLE IF EXISTS movies;

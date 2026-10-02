@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -397,5 +398,49 @@ func writeFandangoGrouping(t *testing.T, writer http.ResponseWriter, id, hash, s
 		},
 	}); err != nil {
 		t.Fatal(err)
+	}
+}
+func TestFandangoShowtimeUsesDateLocalOffset(t *testing.T) {
+	var response fandangoShowtimeGroupingsResponse
+	if err := json.Unmarshal([]byte(`{"theaterShowtimes":{"theaters":[{"id":"1","name":"Venue","variants":[{"amenityGroups":[{"showtimes":[{"dateLocal":"2026-10-02T19:45:00-06:00"}]}]}]}]}}`), &response); err != nil {
+		t.Fatal(err)
+	}
+	showtimes := normalizeFandangoShowtimes(response, fandangoMovie{Name: "Film"}, domain.QueryRequest{Time: domain.TimeConstraint{Timezone: "America/New_York"}})
+	if len(showtimes) != 1 || showtimes[0].StartsAt.UTC().Format(time.RFC3339) != "2026-10-03T01:45:00Z" || showtimes[0].VenueTimezone != "" {
+		t.Fatalf("offset-bearing dateLocal was not parsed as an instant: %#v", showtimes)
+	}
+}
+
+func TestFandangoDiscoveryCacheIncludesTimezoneAndIsBounded(t *testing.T) {
+	var reads atomic.Int32
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reads.Add(1)
+		_ = json.NewEncoder(w).Encode(map[string]any{"theaterShowtimes": map[string]any{"theaters": []any{}}})
+	}))
+	defer server.Close()
+	provider, err := NewFandangoLocal(FandangoLocalConfig{BaseURL: server.URL, MinimumDelay: time.Millisecond}, server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	movie := fandangoMovie{ID: "1", Name: "Film"}
+	query := domain.QueryRequest{Location: domain.LocationConstraint{Query: "10001"}, Time: domain.TimeConstraint{Timezone: "America/New_York"}}
+	if _, err := provider.discoverDate(context.Background(), movie, "2026-08-01", query); err != nil {
+		t.Fatal(err)
+	}
+	query.Time.Timezone = "America/Los_Angeles"
+	if _, err := provider.discoverDate(context.Background(), movie, "2026-08-01", query); err != nil {
+		t.Fatal(err)
+	}
+	if reads.Load() != 2 || len(provider.discoveryCache) != 2 {
+		t.Fatalf("timezone-dependent entries were shared: reads=%d cache=%d", reads.Load(), len(provider.discoveryCache))
+	}
+	cache := make(map[string]cachedFandangoMovie)
+	now := time.Now()
+	for i := range 501 {
+		cache[strconv.Itoa(i)] = cachedFandangoMovie{expiresAt: now.Add(time.Hour)}
+		evictFandangoCache(cache, now, 500, func(value cachedFandangoMovie) time.Time { return value.expiresAt })
+	}
+	if len(cache) > 500 {
+		t.Fatalf("cache exceeded cap: %d", len(cache))
 	}
 }

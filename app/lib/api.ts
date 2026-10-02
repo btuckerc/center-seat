@@ -19,6 +19,8 @@ export type QueryState = {
   movie: string;
   movieId?: string;
   location: string;
+  /** IANA zone that defines the date range, time window, and displayed times. */
+  timezone: string;
   latitude?: number;
   longitude?: number;
   dateStart: string;
@@ -67,6 +69,7 @@ export type Showtime = {
   captions?: string;
   audio_description?: boolean;
   booking_url?: string;
+  venue_timezone?: string;
 };
 
 export type Recommendation = {
@@ -97,6 +100,8 @@ export type SeatQueryResponse = {
   status: "complete" | "partial" | "no_match";
   generated_at: string;
   expires_at: string;
+  /** Ranks can be refreshed until this instant; afterwards the search must be re-run. */
+  refresh_until: string;
   coverage: {
     dates_requested: number;
     dates_with_screenings: number;
@@ -161,23 +166,38 @@ export type TrendingMovie = {
   certified_fresh?: boolean;
 };
 
-const localDate = (date: Date) => {
-  const year = date.getFullYear();
-  const month = `${date.getMonth() + 1}`.padStart(2, "0");
-  const day = `${date.getDate()}`.padStart(2, "0");
-  return `${year}-${month}-${day}`;
-};
+export const defaultTimeZone = "America/New_York";
 
-export function createDefaultQuery(): QueryState {
-  const start = new Date();
-  start.setDate(start.getDate() + 1);
-  const end = new Date(start);
-  end.setDate(end.getDate() + 6);
+export function isValidTimeZone(value: string | undefined | null): value is string {
+  if (!value || !/^[A-Za-z_]+(?:\/[A-Za-z0-9_+-]+)*$/.test(value)) return false;
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone: value });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function browserTimeZone(): string {
+  const zone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+  return isValidTimeZone(zone) ? zone : defaultTimeZone;
+}
+
+/** Calendar date (YYYY-MM-DD) in `timeZone`, offset by whole days. */
+export function dateInTimeZone(timeZone: string, offsetDays = 0, now = new Date()): string {
+  const parts = new Intl.DateTimeFormat("en-CA", { timeZone, year: "numeric", month: "2-digit", day: "2-digit" }).formatToParts(now);
+  const part = (type: string) => Number(parts.find((item) => item.type === type)?.value);
+  const shifted = new Date(Date.UTC(part("year"), part("month") - 1, part("day") + offsetDays));
+  return shifted.toISOString().slice(0, 10);
+}
+
+export function createDefaultQuery(timeZone: string = defaultTimeZone): QueryState {
   return {
     movie: "",
     location: "",
-    dateStart: localDate(start),
-    dateEnd: localDate(end),
+    timezone: timeZone,
+    dateStart: dateInTimeZone(timeZone, 1),
+    dateEnd: dateInTimeZone(timeZone, 7),
     tickets: 2,
     timeMode: "any",
     startTime: "17:00",
@@ -198,6 +218,124 @@ export function createDefaultQuery(): QueryState {
   };
 }
 
-export function recommendationLabels(recommendation: Recommendation) {
-  return recommendation.seats.map((seat) => seat.label);
+/** Backend `QueryRequest` JSON (see openapi/v1.yaml SeatQueryRequest). */
+export type QueryRequestPayload = {
+  movie_query: string;
+  movie_id?: string;
+  location: { query: string; latitude?: number; longitude?: number; radius_miles: number };
+  dates: { start: string; end: string };
+  time: { mode: TimeMode; start: string; end: string; timezone: string };
+  ticket_count: number;
+  seat_profile: SeatProfile;
+  custom_seat_zone?: { minimum_x: number; maximum_x: number; minimum_y: number; maximum_y: number };
+  formats: string[];
+  captions: string;
+  audio_description: boolean;
+  wheelchair_spaces: number;
+  companion_seats: number;
+  amenities_required: string[];
+  max_distance_miles: number;
+  max_total_price?: number;
+  allow_unknown_price: boolean;
+  exclude_first_rows: number;
+  allow_split_party: boolean;
+  minimum_geometry_confidence: string;
+};
+
+/** Backend request for a search state. The timezone is always explicit. */
+export function queryStateToRequest(state: QueryState): QueryRequestPayload {
+  return {
+    movie_query: state.movie.trim(),
+    ...(state.movieId ? { movie_id: state.movieId } : {}),
+    location: {
+      query: state.location.trim(),
+      ...(state.latitude !== undefined ? { latitude: state.latitude } : {}),
+      ...(state.longitude !== undefined ? { longitude: state.longitude } : {}),
+      radius_miles: state.maxDistance,
+    },
+    dates: { start: state.dateStart, end: state.dateEnd },
+    time: { mode: state.timeMode, start: state.startTime, end: state.endTime, timezone: state.timezone },
+    ticket_count: state.tickets,
+    seat_profile: state.profile,
+    ...(state.profile === "custom" ? { custom_seat_zone: {
+      minimum_x: state.customSeatZone.minimumX,
+      maximum_x: state.customSeatZone.maximumX,
+      minimum_y: state.customSeatZone.minimumY,
+      maximum_y: state.customSeatZone.maximumY,
+    } } : {}),
+    formats: state.formats.map((format) => format.toLowerCase()),
+    captions: state.captions,
+    audio_description: state.audioDescription,
+    wheelchair_spaces: state.wheelchairSpaces,
+    companion_seats: state.companionSeats,
+    amenities_required: state.recliners ? ["recliner"] : [],
+    max_distance_miles: state.maxDistance,
+    ...(state.limitPrice ? { max_total_price: state.maxPrice } : {}),
+    allow_unknown_price: !state.limitPrice,
+    exclude_first_rows: state.excludeFirstRows,
+    allow_split_party: state.allowSplit,
+    minimum_geometry_confidence: "row_geometry",
+  };
+}
+
+/** Date/time labels for a screening in an explicit zone (never the viewer's ambient zone). */
+export function formatShowtime(startsAt: string, timeZone: string) {
+  const instant = new Date(startsAt);
+  return {
+    date: new Intl.DateTimeFormat("en-US", { timeZone, weekday: "short", month: "short", day: "numeric" }).format(instant),
+    time: new Intl.DateTimeFormat("en-US", { timeZone, hour: "numeric", minute: "2-digit" }).format(instant),
+    zone: new Intl.DateTimeFormat("en-US", { timeZone, timeZoneName: "short" }).formatToParts(instant).find((part) => part.type === "timeZoneName")?.value ?? timeZone,
+  };
+}
+
+export type CheckoutHandoff = {
+  movie: string;
+  venue: string;
+  auditorium?: string;
+  starts_at: string;
+  local_start: string;
+  timezone: string;
+  format: string;
+  ticket_count: number;
+  seats: string[];
+  booking_url?: string;
+  verified_at: string;
+  share_url?: string;
+  instructions: string;
+};
+
+/**
+ * Exact-seat purchase handoff for a person or a browser agent. CenterSeat never
+ * holds seats; the provider checkout must select these seats and stop before payment.
+ */
+export function buildCheckoutHandoff(recommendation: Recommendation, ticketCount: number, timeZone: string, shareURL?: string): CheckoutHandoff {
+  const labels = formatShowtime(recommendation.showtime.starts_at, timeZone);
+  const seats = recommendation.seats.map((seat) => seat.label);
+  const bookingURL = recommendation.booking_url || recommendation.showtime.booking_url || undefined;
+  return {
+    movie: recommendation.showtime.movie_title,
+    venue: recommendation.showtime.venue_name,
+    ...(recommendation.showtime.auditorium_name ? { auditorium: recommendation.showtime.auditorium_name } : {}),
+    starts_at: recommendation.showtime.starts_at,
+    local_start: `${labels.date} ${labels.time} ${labels.zone}`,
+    timezone: timeZone,
+    format: recommendation.showtime.format,
+    ticket_count: ticketCount,
+    seats,
+    ...(bookingURL ? { booking_url: bookingURL } : {}),
+    verified_at: recommendation.verified_at,
+    ...(shareURL ? { share_url: shareURL } : {}),
+    instructions: `Open the provider checkout for ${recommendation.showtime.venue_name} at ${labels.date} ${labels.time} ${labels.zone}, choose ${ticketCount} ticket${ticketCount === 1 ? "" : "s"}, select seats ${seats.join(", ")}, and stop before any payment is submitted. If any seat is no longer available, do not substitute; re-run the CenterSeat search.`,
+  };
+}
+
+export function handoffText(handoff: CheckoutHandoff): string {
+  return [
+    `${handoff.movie} — ${handoff.venue}${handoff.auditorium ? ` (${handoff.auditorium})` : ""}`,
+    `${handoff.local_start} · ${handoff.format}`,
+    `${handoff.ticket_count} ticket${handoff.ticket_count === 1 ? "" : "s"} · seats ${handoff.seats.join(", ")}`,
+    handoff.booking_url ? `Checkout: ${handoff.booking_url}` : "No provider checkout link returned",
+    handoff.share_url ? `Search: ${handoff.share_url}` : "",
+    `Seats verified ${handoff.verified_at}`,
+  ].filter(Boolean).join("\n");
 }

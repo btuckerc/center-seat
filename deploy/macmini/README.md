@@ -15,7 +15,7 @@ docker compose -p centerseat \
 The override:
 
 - binds the web app to `127.0.0.1:13000`;
-- keeps the API, PostgreSQL, and Redis off host ports;
+- keeps the API off host ports;
 - restarts services after Docker or host restarts;
 - adds a web health check.
 

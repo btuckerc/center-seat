@@ -8,6 +8,8 @@ services:
     environment:
       CENTERSEAT_API_URL: http://api:8080
       CENTERSEAT_TRENDING_TIMEOUT_MS: ${CENTERSEAT_TRENDING_TIMEOUT_MS:-4000}
+      CENTERSEAT_AGENT_TOKEN: ${CENTERSEAT_AGENT_TOKEN:-}
+      CENTERSEAT_PUBLIC_URL: ${CENTERSEAT_PUBLIC_URL:-}
       OPEN_CINEMA_API_BASE_URL: ${OPEN_CINEMA_API_BASE_URL:-https://opencinema.app}
       OPEN_CINEMA_API_KEY: ${OPEN_CINEMA_API_KEY:-}
     ports:
@@ -31,8 +33,6 @@ services:
       FANDANGO_BASE_URL: ${FANDANGO_BASE_URL:-https://www.fandango.com}
       FANDANGO_MINIMUM_DELAY_MS: ${FANDANGO_MINIMUM_DELAY_MS:-50}
       FANDANGO_MAX_CONCURRENCY: ${FANDANGO_MAX_CONCURRENCY:-8}
-      DATABASE_URL: postgres://centerseat:${POSTGRES_PASSWORD:?required}@postgres:5432/centerseat?sslmode=disable
-      REDIS_URL: redis://redis:6379/0
     ports:
       - "8080:8080"
     healthcheck:
@@ -40,38 +40,3 @@ services:
       interval: 10s
       timeout: 3s
       retries: 5
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-
-  postgres:
-    image: postgres:16-alpine
-    environment:
-      POSTGRES_DB: centerseat
-      POSTGRES_USER: centerseat
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?required}
-    volumes:
-      - centerseat-postgres:/var/lib/postgresql/data
-      - ./backend/migrations/000001_core.up.sql:/docker-entrypoint-initdb.d/000001_core.sql:ro
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U centerseat -d centerseat"]
-      interval: 5s
-      timeout: 3s
-      retries: 10
-
-  redis:
-    image: redis:7-alpine
-    command: ["redis-server", "--appendonly", "yes", "--maxmemory-policy", "allkeys-lru"]
-    volumes:
-      - centerseat-redis:/data
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 5s
-      timeout: 3s
-      retries: 10
-
-volumes:
-  centerseat-postgres:
-  centerseat-redis:
